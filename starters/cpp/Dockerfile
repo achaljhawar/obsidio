@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       g++=4:12.2.0-3 \
       cmake=3.25.1-1 \
       make=4.3-4.1 \
-      libssl-dev=3.0.17-1~deb12u2 \
+      libssl-dev=3.0.20-1~deb12u2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -26,7 +26,7 @@ RUN ./build/obsidio-selftest
 FROM debian:bookworm-20240926-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libssl3=3.0.17-1~deb12u2 \
+      libssl3=3.0.20-1~deb12u2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /app/build/obsidio-server /usr/local/bin/obsidio-server
