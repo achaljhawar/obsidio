@@ -11,9 +11,13 @@
 namespace obsidio {
 namespace {
 
-// The reference chain: one library call per iteration. Kept verbatim as the
-// thing every accelerated back end is checked against, and used as the fallback
-// when no back end qualifies.
+// The reference chain: one generic library call per iteration. This is the
+// ORACLE -- the thing every accelerated back end is checked against in
+// verify_backend() -- and it is deliberately the slowest, plainest expression
+// of the spec. It is never used to serve a request.
+//
+// Do not "optimise" this. Its only job is to be obviously correct, and it costs
+// nothing: verify_backend() runs it for at most 65 iterations, once, at start.
 std::string chain_reference(const std::string& seed, int iterations) {
   if (iterations <= 0) return seed;
 
@@ -25,6 +29,32 @@ std::string chain_reference(const std::string& seed, int iterations) {
 
   for (int i = 1; i < iterations; ++i) {
     sha256(reinterpret_cast<const std::uint8_t*>(hex), kSha256HexBytes, digest);
+    hex_encode(digest, kSha256DigestBytes, hex);
+  }
+  return std::string(hex, kSha256HexBytes);
+}
+
+// The serving fallback, used when no accelerated back end qualifies: an x86
+// grading box, an ARM core without HWCAP_SHA2, RISK_BACKEND=reference, or a
+// back end that failed verification. Same digest as chain_reference(), but the
+// 49,999 hot rounds go through the specialised 64-byte transform instead of the
+// one-shot API and its per-call provider fetch. Roughly 5x.
+//
+// Kept SEPARATE from chain_reference() on purpose. If the oracle and the code
+// it validates shared this primitive, a bug in sha256_64 would move both and
+// verify_backend() could accept a broken back end. The oracle stays on the most
+// exercised primitive in the tree; the self-test pins sha256_64 to it directly.
+std::string chain_fallback(const std::string& seed, int iterations) {
+  if (iterations <= 0) return seed;
+
+  char hex[kSha256HexBytes];
+  std::uint8_t digest[kSha256DigestBytes];
+
+  sha256(reinterpret_cast<const std::uint8_t*>(seed.data()), seed.size(), digest);
+  hex_encode(digest, kSha256DigestBytes, hex);
+
+  for (int i = 1; i < iterations; ++i) {
+    sha256_64(reinterpret_cast<const std::uint8_t*>(hex), digest);
     hex_encode(digest, kSha256DigestBytes, hex);
   }
   return std::string(hex, kSha256HexBytes);
@@ -144,7 +174,7 @@ const char* risk_backend_name() {
   init_risk_backend();
   if (g_backend != nullptr) return g_backend->name;
   return g_rejected ? "reference (accelerated back end REJECTED)"
-                    : "reference (per-call SHA-256)";
+                    : "reference (specialised 64-byte transform)";
 }
 
 bool risk_backend_rejected() {
@@ -155,7 +185,7 @@ bool risk_backend_rejected() {
 std::string risk_hash(const std::string& seed, int iterations) {
   if (iterations <= 0) return seed;
   init_risk_backend();
-  if (g_backend == nullptr) return chain_reference(seed, iterations);
+  if (g_backend == nullptr) return chain_fallback(seed, iterations);
 
   char state[kSha256HexBytes];
   char out[kSha256HexBytes];

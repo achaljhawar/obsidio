@@ -2,22 +2,67 @@
 
 #include <cstring>
 
-namespace obsidio {
-
 #if defined(OBSIDIO_USE_OPENSSL)
-
 // OpenSSL dispatches to SHA-NI on x86-64 and the ARMv8 crypto extensions on
 // aarch64 at runtime. This is the same hardware path Go's crypto/sha256 uses,
 // so it is the fair baseline to measure against -- the portable path below is
 // several times slower and would flatter any optimisation you make later.
-}  // namespace obsidio
-
+//
+// SHA256_Transform is deprecated in OpenSSL 3.0, and the suppression below is
+// deliberate: it is the only supported way to reach the hardware block function
+// without going back through the EVP layer. The one-shot SHA256() re-fetches
+// its provider on EVERY call, which for a 64-byte input costs several times the
+// compression itself -- and the risk chain makes 49,999 of those calls per
+// request. Measured on aarch64, 50,000 rounds: SHA256() 16.78 ms,
+// Init+Update+Final 3.27 ms, Init+Transform x2 2.92 ms.
+//
+// The Dockerfile pins libssl3=3.0.20-1~deb12u2, so this API is present and
+// stable for the build we ship. Revisit if that pin ever moves to OpenSSL 4.
+#define OPENSSL_SUPPRESS_DEPRECATED
 #include <openssl/sha.h>
+#endif
 
 namespace obsidio {
+namespace {
 
+// The second SHA-256 block of ANY 64-byte message is this exact constant: the
+// 0x80 terminator, zero padding, then a big-endian 64-bit length of 512 bits.
+// Every round of the risk chain after the first hashes exactly 64 hex chars, so
+// every one of them ends with this block.
+constexpr std::uint8_t kPad64[64] = {
+    0x80, 0, 0, 0, 0, 0, 0,    0,
+    0,    0, 0, 0, 0, 0, 0,    0,
+    0,    0, 0, 0, 0, 0, 0,    0,
+    0,    0, 0, 0, 0, 0, 0,    0,
+    0,    0, 0, 0, 0, 0, 0,    0,
+    0,    0, 0, 0, 0, 0, 0,    0,
+    0,    0, 0, 0, 0, 0, 0,    0,
+    0,    0, 0, 0, 0, 0, 0x02, 0,
+};
+
+}  // namespace
+
+#if defined(OBSIDIO_USE_OPENSSL)
+
+// Generic path. Used for the caller's arbitrary-length seed (round one), by the
+// reference chain that verifies every accelerated back end, and by the
+// self-test. Not hot.
 void sha256(const std::uint8_t* data, std::size_t len, std::uint8_t out[32]) {
   ::SHA256(data, len, out);
+}
+
+void sha256_64(const std::uint8_t in[64], std::uint8_t out[32]) {
+  SHA256_CTX ctx;
+  SHA256_Init(&ctx);
+  SHA256_Transform(&ctx, in);      // block 1: the 64 message bytes
+  SHA256_Transform(&ctx, kPad64);  // block 2: the constant padding block
+  for (int i = 0; i < 8; ++i) {
+    const std::uint32_t v = ctx.h[i];
+    out[i * 4]     = static_cast<std::uint8_t>(v >> 24);
+    out[i * 4 + 1] = static_cast<std::uint8_t>(v >> 16);
+    out[i * 4 + 2] = static_cast<std::uint8_t>(v >> 8);
+    out[i * 4 + 3] = static_cast<std::uint8_t>(v);
+  }
 }
 
 #else
@@ -99,6 +144,21 @@ void sha256(const std::uint8_t* data, std::size_t len, std::uint8_t out[32]) {
   }
   for (std::size_t i = 0; i < tail_len; i += 64) compress(state, tail + i);
 
+  for (int i = 0; i < 8; ++i) {
+    out[i * 4]     = static_cast<std::uint8_t>(state[i] >> 24);
+    out[i * 4 + 1] = static_cast<std::uint8_t>(state[i] >> 16);
+    out[i * 4 + 2] = static_cast<std::uint8_t>(state[i] >> 8);
+    out[i * 4 + 3] = static_cast<std::uint8_t>(state[i]);
+  }
+}
+
+void sha256_64(const std::uint8_t in[64], std::uint8_t out[32]) {
+  std::uint32_t state[8] = {
+      0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
+      0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u,
+  };
+  compress(state, in);
+  compress(state, kPad64);
   for (int i = 0; i < 8; ++i) {
     out[i * 4]     = static_cast<std::uint8_t>(state[i] >> 24);
     out[i * 4 + 1] = static_cast<std::uint8_t>(state[i] >> 16);

@@ -37,6 +37,14 @@ std::string sha256_hex(const std::string& input) {
   return std::string(hex, obsidio::kSha256HexBytes);
 }
 
+std::string sha256_64_hex(const std::string& input) {
+  std::uint8_t digest[obsidio::kSha256DigestBytes];
+  obsidio::sha256_64(reinterpret_cast<const std::uint8_t*>(input.data()), digest);
+  char hex[obsidio::kSha256HexBytes];
+  obsidio::hex_encode(digest, obsidio::kSha256DigestBytes, hex);
+  return std::string(hex, obsidio::kSha256HexBytes);
+}
+
 }  // namespace
 
 int main() {
@@ -54,6 +62,35 @@ int main() {
   expect_eq("64-byte input (two-block boundary)",
             sha256_hex(std::string(64, 'a')),
             "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+
+  // sha256_64 is the specialised two-block path the reference chain runs on
+  // every round after the first. It must be byte-identical to the generic one
+  // for every 64-byte input, or the digest silently diverges and every /risk
+  // request served from the fallback scores zero.
+  //
+  // This is what lets chain_fallback() use it while chain_reference() -- the
+  // oracle that validates the accelerated back ends -- stays on the generic
+  // primitive. The two chains differ by exactly this substitution, so pinning
+  // the primitive pins the chain.
+  std::printf("\nSpecialised 64-byte path (sha256_64 == sha256)\n");
+  expect_eq("64 x 'a'", sha256_64_hex(std::string(64, 'a')),
+            sha256_hex(std::string(64, 'a')));
+  expect_eq("64 x 0x00", sha256_64_hex(std::string(64, '\0')),
+            sha256_hex(std::string(64, '\0')));
+  expect_eq("64 x 0xff", sha256_64_hex(std::string(64, '\xff')),
+            sha256_hex(std::string(64, '\xff')));
+  {
+    // A byte sweep across the block, and a real chain value.
+    std::string mixed(64, '\0');
+    for (int i = 0; i < 64; ++i) mixed[i] = static_cast<char>(i * 4 + 1);
+    expect_eq("byte sweep", sha256_64_hex(mixed), sha256_hex(mixed));
+    const std::string chained = sha256_hex("0.5");
+    expect_eq("live chain value", sha256_64_hex(chained), sha256_hex(chained));
+    // Every hex character, since that is all the chain ever feeds it.
+    std::string hexish(64, '0');
+    for (int i = 0; i < 64; ++i) hexish[i] = "0123456789abcdef"[i % 16];
+    expect_eq("hex alphabet", sha256_64_hex(hexish), sha256_hex(hexish));
+  }
 
   std::printf("\nRisk chain, short runs\n");
   expect_eq("seed=0.5    n=1", obsidio::risk_hash("0.5", 1),

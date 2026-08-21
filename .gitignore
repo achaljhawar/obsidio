@@ -1,0 +1,6 @@
+# Build trees (any cmake -B directory)
+starters/cpp/build*/
+# Local bench binaries
+starters/cpp/bench/throttle
+# Serena cache
+.serena/
