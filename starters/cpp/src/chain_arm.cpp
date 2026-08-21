@@ -230,8 +230,37 @@ void chain2_impl(const char in_a[64], const char in_b[64], int rounds,
   lane_store_hex(B, out_b);
 }
 
-const Backend kArmBackend = {"armv8-crypto (x2 interleaved)", chain1_impl,
-                             chain2_impl};
+void chain3_impl(const char in_a[64], const char in_b[64], const char in_c[64],
+                 int rounds, char out_a[64], char out_b[64], char out_c[64]) {
+  if (rounds <= 0) {
+    std::memcpy(out_a, in_a, 64);
+    std::memcpy(out_b, in_b, 64);
+    std::memcpy(out_c, in_c, 64);
+    return;
+  }
+  Lane A, B, C;
+  lane_load(A, in_a);
+  lane_load(B, in_b);
+  lane_load(C, in_c);
+  // Two lanes already hide most of sha256h's latency; the third mops up what
+  // is left. Past this, register pressure costs more than the bubbles it fills.
+  for (int r = 0; r < rounds; ++r) {
+    hash64(A);
+    hash64(B);
+    hash64(C);
+    if (r + 1 < rounds) {
+      digest_to_next_message(A);
+      digest_to_next_message(B);
+      digest_to_next_message(C);
+    }
+  }
+  lane_store_hex(A, out_a);
+  lane_store_hex(B, out_b);
+  lane_store_hex(C, out_c);
+}
+
+const Backend kArmBackend = {"armv8-crypto (x3 interleaved)", chain1_impl,
+                             chain2_impl, chain3_impl};
 
 bool cpu_has_sha2() {
 #if defined(__linux__)

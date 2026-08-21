@@ -63,8 +63,8 @@ bool verify_backend(const chain::Backend& b) {
 
   // chain2 must agree with chain1 -- an interleaving bug that crosses the two
   // lanes would otherwise be invisible until it shipped.
-  char ha[kSha256HexBytes], hb[kSha256HexBytes];
-  char oa[kSha256HexBytes], ob[kSha256HexBytes];
+  char ha[kSha256HexBytes], hb[kSha256HexBytes], hc[kSha256HexBytes];
+  char oa[kSha256HexBytes], ob[kSha256HexBytes], oc[kSha256HexBytes];
   first_round("0.5", ha);
   first_round("0.9999", hb);
   for (const int iterations : {1, 2, 12, 33}) {
@@ -73,6 +73,22 @@ bool verify_backend(const chain::Backend& b) {
       return false;
     }
     if (chain_reference("0.9999", iterations) != std::string(ob, kSha256HexBytes)) {
+      return false;
+    }
+  }
+
+  // Same again for chain3. The third lane is the one most likely to be dropped
+  // or aliased by a copy-paste slip, so it gets a distinct seed of its own.
+  first_round("0.31415", hc);
+  for (const int iterations : {1, 2, 12, 33}) {
+    b.chain3(ha, hb, hc, iterations - 1, oa, ob, oc);
+    if (chain_reference("0.5", iterations) != std::string(oa, kSha256HexBytes)) {
+      return false;
+    }
+    if (chain_reference("0.9999", iterations) != std::string(ob, kSha256HexBytes)) {
+      return false;
+    }
+    if (chain_reference("0.31415", iterations) != std::string(oc, kSha256HexBytes)) {
       return false;
     }
   }
@@ -146,6 +162,29 @@ void risk_hash_x2(const std::string& seed_a, const std::string& seed_b,
   g_backend->chain2(sa, sb, iterations - 1, ra, rb);
   out_a.assign(ra, kSha256HexBytes);
   out_b.assign(rb, kSha256HexBytes);
+}
+
+void risk_hash_x3(const std::string& seed_a, const std::string& seed_b,
+                  const std::string& seed_c, std::string& out_a,
+                  std::string& out_b, std::string& out_c, int iterations) {
+  init_risk_backend();
+  if (g_backend == nullptr || iterations <= 0) {
+    // Correct either way, just without the interleaving win.
+    out_a = risk_hash(seed_a, iterations);
+    out_b = risk_hash(seed_b, iterations);
+    out_c = risk_hash(seed_c, iterations);
+    return;
+  }
+
+  char sa[kSha256HexBytes], sb[kSha256HexBytes], sc[kSha256HexBytes];
+  char ra[kSha256HexBytes], rb[kSha256HexBytes], rc[kSha256HexBytes];
+  first_round(seed_a, sa);
+  first_round(seed_b, sb);
+  first_round(seed_c, sc);
+  g_backend->chain3(sa, sb, sc, iterations - 1, ra, rb, rc);
+  out_a.assign(ra, kSha256HexBytes);
+  out_b.assign(rb, kSha256HexBytes);
+  out_c.assign(rc, kSha256HexBytes);
 }
 
 }  // namespace obsidio

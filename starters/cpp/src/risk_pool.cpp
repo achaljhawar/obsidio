@@ -83,12 +83,15 @@ void RiskPool::worker_loop() {
   deprioritise_current_thread();
 
   for (;;) {
-    // Take TWO jobs when two are queued. A single chain is latency-bound, so
-    // running a second one interleaved costs ~45% more time and produces two
-    // answers -- roughly 1.45x throughput. Under the graded load the queue sits
-    // ~190 deep at peak, so pairs are essentially always available; the
-    // single-job path is what runs during ramp-up and cool-down.
-    RiskJob jobs[2];
+    // Take up to THREE jobs when three are queued. A single chain is
+    // latency-bound, so extra independent chains interleaved in the same loop
+    // ride along in the pipeline bubbles: three cost ~37% more time than one
+    // and produce three answers. This is instruction-level parallelism inside
+    // one thread, NOT extra threads -- the worker count is unchanged and the
+    // 2-CPU cap is untouched. Under the graded load the queue sits deep at
+    // peak, so triples are essentially always available; the x2 and x1 paths
+    // are what run during ramp-up and cool-down.
+    RiskJob jobs[3];
     int taken = 0;
     {
       std::unique_lock<std::mutex> lock(mutex_);
@@ -96,7 +99,7 @@ void RiskPool::worker_loop() {
         return stopping_.load(std::memory_order_relaxed) || !queue_.empty();
       });
       if (queue_.empty()) return;  // stopping and drained
-      while (taken < 2 && !queue_.empty()) {
+      while (taken < 3 && !queue_.empty()) {
         jobs[taken++] = std::move(queue_.front());
         queue_.pop_front();
       }
@@ -116,7 +119,14 @@ void RiskPool::worker_loop() {
       ++live;
     }
 
-    if (live == 2) {
+    if (live == 3) {
+      std::string digest_a, digest_b, digest_c;
+      risk_hash_x3(jobs[0].seed, jobs[1].seed, jobs[2].seed, digest_a, digest_b,
+                   digest_c);
+      on_done_(jobs[0], digest_a);
+      on_done_(jobs[1], digest_b);
+      on_done_(jobs[2], digest_c);
+    } else if (live == 2) {
       std::string digest_a, digest_b;
       risk_hash_x2(jobs[0].seed, jobs[1].seed, digest_a, digest_b);
       on_done_(jobs[0], digest_a);

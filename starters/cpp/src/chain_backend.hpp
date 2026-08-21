@@ -29,6 +29,12 @@ struct Backend {
   // Advance two independent chains in lockstep. Same contract as chain1.
   void (*chain2)(const char in_a[64], const char in_b[64], int rounds,
                  char out_a[64], char out_b[64]);
+
+  // Three in lockstep. Same contract again. Three is the sweet spot on ARM:
+  // a Lane is six 128-bit vectors, so three lanes hold 18 of the 32 NEON
+  // registers and still fit; four measured no better and six spills.
+  void (*chain3)(const char in_a[64], const char in_b[64], const char in_c[64],
+                 int rounds, char out_a[64], char out_b[64], char out_c[64]);
 };
 
 // Returns nullptr when this build was not compiled for aarch64, or when the

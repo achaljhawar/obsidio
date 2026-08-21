@@ -108,6 +108,46 @@ int main() {
     expect_eq("x2 n=1 lane B", b, obsidio::risk_hash("none", 1));
   }
 
+  std::printf("\nRisk chain, x3 interleaved (what the pool runs at peak)\n");
+  {
+    const std::string kSeed05 = obsidio::risk_hash("0.5");
+    const std::string kSeedNone = obsidio::risk_hash("none");
+    std::string a, b, c;
+
+    obsidio::risk_hash_x3("0.5", "none", "0.4821", a, b, c);
+    expect_eq("x3 lane A  seed=0.5", a, kSeed05);
+    expect_eq("x3 lane B  seed=none", b, kSeedNone);
+    expect_eq("x3 lane C  seed=0.4821", c, obsidio::risk_hash("0.4821"));
+
+    // Rotate the seeds: a lane that quietly reads its neighbour's state passes
+    // one ordering and fails another.
+    obsidio::risk_hash_x3("0.4821", "0.5", "none", a, b, c);
+    expect_eq("x3 rotated A  seed=0.4821", a, obsidio::risk_hash("0.4821"));
+    expect_eq("x3 rotated B  seed=0.5", b, kSeed05);
+    expect_eq("x3 rotated C  seed=none", c, kSeedNone);
+
+    obsidio::risk_hash_x3("0.5", "0.5", "0.5", a, b, c);
+    expect_eq("x3 same seed all lanes A==B", a, b);
+    expect_eq("x3 same seed all lanes B==C", b, c);
+
+    // x3 must agree with x2 and x1 on the lanes they share, or the pool serves
+    // different digests depending on how deep the queue happened to be.
+    std::string xa, xb;
+    obsidio::risk_hash_x2("0.5", "none", xa, xb);
+    obsidio::risk_hash_x3("0.5", "none", "0.4821", a, b, c);
+    expect_eq("x3 agrees with x2 lane A", a, xa);
+    expect_eq("x3 agrees with x2 lane B", b, xb);
+
+    obsidio::risk_hash_x3("0.5", "0.4821", "none", a, b, c, 10);
+    expect_eq("x3 n=10 lane A", a, obsidio::risk_hash("0.5", 10));
+    expect_eq("x3 n=10 lane B", b, obsidio::risk_hash("0.4821", 10));
+    expect_eq("x3 n=10 lane C", c, obsidio::risk_hash("none", 10));
+    obsidio::risk_hash_x3("0.5", "none", "0.4821", a, b, c, 1);
+    expect_eq("x3 n=1 lane A", a, obsidio::risk_hash("0.5", 1));
+    expect_eq("x3 n=1 lane B", b, obsidio::risk_hash("none", 1));
+    expect_eq("x3 n=1 lane C", c, obsidio::risk_hash("0.4821", 1));
+  }
+
   // -------------------------------------------------------------------------
   // A rejected back end is not a correctness failure -- risk.cpp falls back to
   // the reference chain and every digest above still passes -- but it silently
