@@ -235,6 +235,25 @@ Two runs of the committed x4 tree scored 8,866,401 and 8,859,797 — a spread of
 +0.63% is reported above as a real-but-small gain rather than dismissed as
 noise.
 
+### Thread configuration sweep (2026-08-22)
+
+`IO_THREADS` × `RISK_WORKERS` swept on the committed x4 tree, one full ramp
+each, every threshold green, 0.00% errors:
+
+| io | rw | `work_score` | vs committed | `/price` p95 |
+|---|---|---|---|---|
+| **1** | **2** | **9,211,336** | **+3.9%** | 530 µs |
+| 1 | 3 | 9,021,912 | +1.8% | 679 µs |
+| 2 | 2 (committed) | 8,866,401 | — | 507 µs |
+| 2 | 3 | 8,718,295 | −1.7% | 619 µs |
+
+io=1/rw=2 wins well clear of the noise floor, and the confirm re-run holds:
+9,211,336 / 9,189,333 (0.24% spread), a **+3.6–3.9%** gain over the committed
+pair. One epoll loop is plenty for microsecond fast-path work; the freed
+scheduling headroom feeds the hash workers. The default flip still waits for
+the Mac re-check (section 6), because Docker Desktop's port proxy is the one
+thing that could change the IO-thread economics.
+
 ### Verification status
 
 **Everything the earlier draft of this section listed as unproven is now
@@ -266,83 +285,57 @@ pins; reproducible builds are a track rule.
 
 ## 6. Which machine for which work
 
-Two machines are in play: this Apple Silicon Mac, and the DGX Spark. They are
-good at different halves of the problem, and the split is not the obvious one.
+**Update 2026-08-22: the grading box is an arm64 Mac.** That answers the
+architecture question this section was originally written around, and it
+inverts its conclusion. The original analysis of why Docker-on-Mac distorts
+measurement — the Linux VM, the userspace port proxy, a CPU quota inside a
+hypervisor's scheduler — is still technically true. What changed is that those
+distortions are now *the grading environment itself*, identical for every
+team. The Mac goes from “never trust its numbers” to the dress-rehearsal
+machine, and the Spark drops to a regression-ratio box.
 
 | Work | Machine | Needs Docker? |
 |---|---|---|
-| Hash loop optimisation + microbenchmarks | **Mac** | No |
-| Correctness selftest | **Mac** | No |
-| Compiling, syntax checking, editing | Either | No |
-| Latency, tail behaviour, concurrency | **Spark** | Yes |
-| Anything under the 2-CPU cap | **Spark** | Yes |
-| k6 runs of any kind | **Spark** | Yes |
+| Hash loop optimisation + microbenchmarks | **Mac, native** | No |
+| Lane-count re-sweep for Apple silicon | **Mac, native** | No |
+| Correctness selftest | Either | No |
+| Backend-selection check inside the VM | **Mac** | Yes |
+| Final k6 rehearsal + persistence test | **Mac** | Yes |
+| High-volume A/B runs, ratio tuning | Spark | Yes |
 | Write-up and pitch | Either | No |
 
-### Why the Mac cannot give trustworthy latency numbers
+### Three Mac checks that now exist
 
-Docker Desktop on Apple Silicon runs containers inside a **Linux VM**, and that
-VM sits directly on top of the three things this track measures:
+1. **Verify `verify_backend()` selects the ARM chain inside Docker on the
+   Mac.** The `HWCAP_SHA2` gate should pass — Docker's Linux VM exposes the
+   crypto extensions — but if it does not, the OpenSSL fallback serves at ~3×
+   slower and nothing visibly breaks. One container start plus a log read
+   settles it. Highest-priority item on the board: it protects the entire
+   2.96×.
+2. **Re-sweep the lane count natively.** x4 was chosen by the Cortex-X925
+   pipeline and the NEON register file. Apple cores have different `sha256h`
+   latency/throughput and a much wider out-of-order window, so the optimum may
+   move. The computation layer builds natively on macOS and
+   `bench/bench_chain.cpp` already exists; the sweep is minutes. Whatever wins,
+   confirm end-to-end — the microbenchmark understated the interleave twice
+   (section 5).
+3. **Re-run the thread-config sweep under the VM.** io=1/rw=2 won on the Spark
+   (section 5); one IO thread behind Docker Desktop's port proxy is exactly the
+   kind of thing the VM could change.
 
-- **CPU accounting.** The challenge is about cgroup CFS quota behaviour under
-  saturation — bursting, throttling, stall periods. In a VM, `--cpus=2` is a
-  quota against cores the hypervisor is itself scheduling: a quota inside a
-  quota. Even the core-count gotcha misbehaves, since `nproc` reports the VM's
-  allocation rather than the host's core count, so the trap the track is built
-  around does not reproduce faithfully.
-- **Network path.** Published ports on macOS traverse a userspace proxy at the
-  VM boundary. The graded metric is `/price` p95 *in milliseconds*, so a
-  meaningful share of what you would be measuring is the proxy. It is entirely
-  possible to spend a day optimising an artefact of Docker Desktop networking.
-- **`SCHED_IDLE`.** The most important architectural decision in this build is
-  that hash workers run at the weakest scheduler priority so the kernel
-  preempts them instantly. That is real Linux scheduler behaviour and it should
-  be verified on real Linux.
+### What the Spark is still for
 
-The Spark has none of these: native cgroups, native networking, native
-scheduler, and ~20 cores so k6 never competes with the container. `--cpus` and
-`--cpuset-cpus` behave exactly as the grader's will.
+Twenty cores keep k6 well away from the container, run-to-run spread is a
+proven 0.075%, and the silicon is the same family — so it stays the machine
+for high-volume A/B runs where the *ratio* is the answer. Take winners to the
+Mac to confirm.
 
-### What the Mac is genuinely good for
+### The x86 question is closed
 
-The thing the Mac is best at does not need Docker at all.
-
-The hash loop is pure computation — no container, no sockets, no cgroups. The
-baseline in section 5 was measured natively in about two seconds:
-
-```
-clang++ -std=c++17 -O3 -I src src/sha256.cpp src/risk.cpp src/data.cpp bench.cpp -o bench
-```
-
-For the optimisation that actually wins the track, this gives a **cleaner**
-signal than a container would, because there is no quota or VM noise in the
-path. It is also arm64 with crypto extensions, the same family as the Spark, so
-the *ratios* transfer even though the absolutes will not. Same for the selftest:
-11/11 natively, no Docker involved.
-
-So the fast iteration loop is: optimise and microbenchmark the chain on the Mac,
-then take the winning version to the Spark and confirm it under load.
-
-### Is installing Docker on the Mac worth it?
-
-Marginally, for one narrow purpose: **confirming the image still builds** when
-away from the Spark — particularly the apt version pins, which are a guess and
-the likely first failure. That is build validation, not performance, and the VM
-does not distort it.
-
-Do not run k6 through it and believe the output. If running it locally anyway,
-at least run k6 *inside* a container on the same Docker network to skip the
-port-forward proxy; the numbers will still be soft, just less wrong.
-
-### The third machine worth considering
-
-Neither machine is x86. If the organisers confirm the grading box is x86, a
-**cheap 2-core x86 cloud VM** becomes worth an hour: it is the only way to get
-numbers on the real architecture, and the only place AVX2 multi-buffer SHA-256
-can be developed or tested at all. A few dollars, and it settles the largest
-open question in the roadmap.
-
-Gated, as ever, on asking the organisers what they grade on.
+No x86 back end, no x86 cloud VM. On an arm64 grading box the SHA-NI path can
+never be selected. (An amd64 cross-build was attempted on the Spark anyway and
+dies at `exec format error` — no binfmt/qemu — so it could not even be tested
+here.)
 
 ---
 
@@ -372,15 +365,12 @@ Consequences:
   +36% — the biggest win on the board, available here all along. The lesson
   generalises: "the vendor's named multi-buffer extension is x86-only" is not
   the same claim as "instruction-level parallelism is x86-only".
-- **You do not know the grading box's architecture.** So: never `-march=native`,
-  always runtime CPU dispatch, always keep the portable fallback. Any
-  ARM-specific assembly you write must not be the only path. The CMakeLists
-  already refuses `-march=native` for this reason.
-- An x86 SHA-NI back end is still worth building *if* the organisers confirm the
-  grading box is x86 — `chain_backend.hpp` has the seam for it. But it is no
-  longer the blocking question it looks like here, because the ARM path already
-  collected the multi-buffer win. **Ask them anyway.** That single question
-  changes the whole optimisation roadmap.
+- **The grading box's architecture is now known: arm64 (a Mac).** Keep the
+  runtime dispatch and the portable fallback anyway — they are what makes the
+  backend-selection check in section 6 a check rather than a prayer, and the
+  CMakeLists still refuses `-march=native`.
+- The x86 SHA-NI back end is dead: the box is arm64, so that path could never
+  be selected at grading time. `chain_backend.hpp` keeps the seam at zero cost.
 
 ### Heterogeneous cores are a measurement hazard
 
@@ -482,17 +472,25 @@ of importance than predicted:
 
 What is actually left, in order:
 
-1. **The persistence bonus.** Append-only file on a mounted volume, replayed at
-   startup. `POST /price` is not in the k6 mix, so it costs ~nothing during the
-   graded run. This is now the largest uncollected item on the board — real
-   points for an afternoon, versus low single digits from more chain work.
-2. **x86 SHA-NI back end.** Only worth building if the organisers confirm the
-   grading box is x86. `chain_backend.hpp` already has the seam: write the four
-   `chain*` functions and return them from a `sha_ni_backend()`.
-3. **More lanes.** Measured and rejected — x5 gives +0.63% for real cost. Do not
-   revisit without new evidence.
+1. ~~**The persistence bonus.**~~ **Done.** Append-only log (`src/persist.cpp`),
+   one atomic `O_APPEND` write + `fdatasync` per POST, replayed at startup,
+   named volume via `compose/docker-compose.yml`. Proven by
+   `tests/persist_test.sh`: POST → `docker kill` + `rm` → fresh container on
+   the volume → value still served. Regression-checked under the full k6 run:
+   8,818,942 vs the 8,866,401/8,859,797 committed pair (−0.5%, at the noise
+   margin; persistence touches no GET path). All thresholds pass, 0.00% errors.
+2. ~~**x86 SHA-NI back end.**~~ **Dead** — the grading box is an arm64 Mac, so
+   this path can never be selected at grading time. The seam in
+   `chain_backend.hpp` stays, at zero cost, in case that ever changes.
+3. **More lanes.** Measured and rejected on the Spark — x5 gives +0.63% for
+   real cost. The Apple-silicon re-sweep (section 6) is the one piece of new
+   evidence that justifies re-measuring; a different pipeline can move the
+   optimum in either direction.
 4. **`/price` and `/stats` fast-path work.** Currently ~500 µs p95 against a
    200 ms bar. There is nothing to win here; do not be tempted.
+5. **Flip `IO_THREADS` default to 1.** The sweep (section 5) has io=1/rw=2 at
+   a confirmed +3.6–3.9% over the committed io=2/rw=2. Only the Mac re-check
+   stands between this and landing.
 
 ### Do not break the digest
 
@@ -547,12 +545,13 @@ build and none of which are obvious:
 
 ## 11. Open questions
 
-- **What architecture is the grading box?** Ask the organisers. Now a smaller
-  question than it was: the multi-buffer win is already collected on ARM, so
-  this only decides whether an x86 SHA-NI back end is worth adding, not whether
-  the main idea works. If the box is x86, the ARM back end simply does not
-  qualify at runtime and the OpenSSL path serves — correct, but ~3× slower, so
-  it is worth knowing.
+- ~~**What architecture is the grading box?**~~ **Answered: an arm64 Mac.**
+  The ARM back end qualifies on the real hardware and the x86 question is
+  closed. What replaces it, still worth asking the organisers:
+  - Which chip, and how many CPUs are allocated to the Docker VM? A 2-CPU
+    quota against a 4-vCPU VM schedules differently than against 12.
+  - Docker Desktop, OrbStack, or colima? Different port proxies and VM
+    schedulers — changes rehearsal fidelity, not architecture.
 - **Final threshold values.** Current ones are placeholders pending calibration.
   Build for margin, do not over-fit to 200 ms.
 - Does the grader restart the container with `docker restart` (same filesystem)
