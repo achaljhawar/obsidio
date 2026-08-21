@@ -141,11 +141,7 @@ Most of the classic list is already done here: the specialised two-block
 transform, ARMv8 crypto intrinsics with runtime dispatch, SIMD hex encoding via
 `vqtbl1q_u8`, and multi-buffer interleaving. What is left, in order of payoff:
 
-1. **The persistence bonus.** `POST /price` is not in the k6 mix, so appending
-   each update to a file on a mounted volume and replaying at startup costs
-   essentially nothing during the graded run. This is the largest uncollected
-   item on the board — real points for an afternoon, against low single digits
-   from further chain work.
+1. ~~**The persistence bonus.**~~ Done — see the persistence section below.
 2. **An x86 SHA-NI back end**, if you are deploying to x86. `chain_backend.hpp`
    is the seam: implement the four `chain*` functions and return them from a
    `sha_ni_backend()`. On an x86 grading box the ARM back end simply fails its
@@ -207,8 +203,22 @@ what makes C++ survivable on a deadline. Never ship this build — it is roughly
 
 ## Persistence bonus
 
-`POST /price` is implemented but **in memory only**, so it earns no bonus as
-written. To claim it, append each update to a file on a mounted volume and
-replay it at startup. `POST /price` is not in the graded load mix at all, so the
-write cost is essentially free during the run — you do not need Postgres, and
-adding it would spend CPU from the shared 2-core budget for nothing.
+Implemented, in `src/persist.cpp` (~60 lines). Each accepted `POST /price`
+appends one `SYMBOL price\n` line to `PRICE_LOG` (default `/data/prices.log`)
+with a single `O_APPEND` write — atomic at this size, so no lock — followed by
+`fdatasync`, so the update survives `docker kill`, not just a graceful stop. At
+startup the log is replayed in order before the server accepts traffic; a torn
+final line from a crash simply stops the replay, which is the correct recovery.
+Unknown symbols in the log are rejected by `update_price` and skipped.
+
+There is deliberately no database. `POST /price` is not in the graded load mix
+at all, so the write cost lands nowhere, and a database would spend CPU from
+the shared 2-core budget for nothing. The Dockerfile declares `VOLUME /data`;
+`compose/docker-compose.yml` mounts a named volume there, which is what
+survives the stricter `docker rm` + fresh `docker run` case.
+
+`tests/persist_test.sh` proves it end to end: build the image, POST an update,
+`docker kill` + `rm` the container, start a fresh one on the same volume, and
+assert the update is still served. If the log path is unwritable (no volume),
+persistence disables itself with a log line and the server runs normally —
+in-memory only, no bonus, but never a startup failure.

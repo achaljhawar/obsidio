@@ -24,6 +24,7 @@ set(OBSIDIO_SOURCES
   src/chain_arm.cpp
   src/data.cpp
   src/http_server.cpp
+  src/persist.cpp
 )
 
 add_library(obsidio_core STATIC ${OBSIDIO_SOURCES})

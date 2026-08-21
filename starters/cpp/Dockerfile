@@ -38,11 +38,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=build /app/build/obsidio-server /usr/local/bin/obsidio-server
 
+# Persistence bonus. /data is where POST /price updates are logged and
+# replayed from. Declared as a volume so even a plain `docker run` gets an
+# anonymous volume that survives `docker restart`; the compose file mounts a
+# named volume here to survive the stricter rm + re-run case.
+RUN mkdir -p /data
+VOLUME /data
+
 # Sized for the 2-CPU cap, NOT for the host core count the container can see.
 ENV IO_THREADS=2 \
     RISK_WORKERS=2 \
     RISK_QUEUE=512 \
-    RISK_DEADLINE_MS=0
+    RISK_DEADLINE_MS=0 \
+    PRICE_LOG=/data/prices.log
 
 EXPOSE 8080
 CMD ["/usr/local/bin/obsidio-server"]
