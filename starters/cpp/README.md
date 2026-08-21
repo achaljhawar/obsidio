@@ -115,7 +115,7 @@ to, and read the ratios rather than the absolutes.
 
 | Build | `work_score` | vs previous | `/risk` p95 | req/s |
 |---|---|---|---|---|
-| OpenSSL one-shot `SHA256()` | 2,997,122 | — | 399 ms | 4,439 |
+| OpenSSL, two-block `sha256_64()` | 2,997,122 | — | 399 ms | 4,439 |
 | ARMv8 crypto, x2 interleaved | 6,508,268 | **+117%** | 184 ms | 9,650 |
 | ARMv8 crypto, x3 interleaved | 8,074,407 | **+24.1%** | 146 ms | 11,957 |
 | **ARMv8 crypto, x4 interleaved** | **8,866,401** | **+9.8%** | **132 ms** | **13,140** |

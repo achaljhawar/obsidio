@@ -183,13 +183,21 @@ grading hardware — optimise on ratios, not absolutes.
 
 | Build | `work_score` | vs previous | `/risk` p95 | req/s |
 |---|---|---|---|---|
-| OpenSSL one-shot `SHA256()` | 2,997,122 | — | 399 ms | 4,439 |
+| OpenSSL, two-block `sha256_64()` | 2,997,122 | — | 399 ms | 4,439 |
 | ARMv8 crypto, x2 interleaved | 6,508,268 | **+117%** | 184 ms | 9,650 |
 | ARMv8 crypto, x3 interleaved | 8,074,407 | **+24.1%** | 146 ms | 11,957 |
 | **ARMv8 crypto, x4 interleaved** | **8,866,401** | **+9.8%** | **132 ms** | **13,140** |
 | x5 interleaved (tested, dropped) | 8,922,428 | +0.63% | 130 ms | 13,217 |
 
 **2.96× end to end.** Every row cleared all four thresholds with 0.00% errors.
+
+The baseline row is *not* the naive build. It already carries `sha256_64()`, a
+specialised two-block transform that avoids OpenSSL 3.x's per-call EVP provider
+fetch — worth 16.62 → 4.74 ms/chain on its own, measured, though never run
+end-to-end through k6. So the true naive-OpenSSL starting point is roughly 3.5×
+worse again than the first row, and the honest end-to-end figure against a
+one-shot `SHA256()` build is closer to **10×**. It is quoted as 2.96× here
+because that is what was actually measured on both ends.
 
 Two findings worth carrying into the pitch, because neither is obvious:
 
