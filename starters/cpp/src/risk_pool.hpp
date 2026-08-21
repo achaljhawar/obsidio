@@ -50,6 +50,7 @@ class RiskPool {
 
  private:
   void worker_loop();
+  bool expired(const RiskJob& job) const;
 
   mutable std::mutex mutex_;
   std::condition_variable cv_;

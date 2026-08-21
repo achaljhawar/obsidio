@@ -74,6 +74,55 @@ int main() {
   expect_eq("seed=none", obsidio::risk_hash("none"),
             "5b83a4893dc72cfd45dabf4fae920510e38954cafa2481efce3f7815d09bc460");
 
+  // -------------------------------------------------------------------------
+  // The paired path the risk pool actually runs at peak. Two chains sharing one
+  // thread is exactly where a lane-crossing bug lives, and such a bug produces
+  // two perfectly plausible 64-char hex strings, so it has to be checked
+  // against the same goldens as the single path.
+  std::printf("\nRisk chain, x2 interleaved (what the pool runs at peak)\n");
+  {
+    std::string a, b;
+
+    obsidio::risk_hash_x2("0.5", "none", a, b);
+    expect_eq("x2 lane A  seed=0.5", a,
+              "8dc4014994d6d0df04656cb1d5988562af06015babd9592bf37451173c451148");
+    expect_eq("x2 lane B  seed=none", b,
+              "5b83a4893dc72cfd45dabf4fae920510e38954cafa2481efce3f7815d09bc460");
+
+    // Swapped, to catch a back end that silently returns lane A twice.
+    obsidio::risk_hash_x2("none", "0.5", a, b);
+    expect_eq("x2 swapped A  seed=none", a,
+              "5b83a4893dc72cfd45dabf4fae920510e38954cafa2481efce3f7815d09bc460");
+    expect_eq("x2 swapped B  seed=0.5", b,
+              "8dc4014994d6d0df04656cb1d5988562af06015babd9592bf37451173c451148");
+
+    // Identical seeds must give identical digests, short chains must match the
+    // single-chain path, and n=1 exercises the zero-rounds edge.
+    obsidio::risk_hash_x2("0.5", "0.5", a, b);
+    expect_eq("x2 same seed both lanes", a, b);
+    obsidio::risk_hash_x2("0.5", "0.4821", a, b, 10);
+    expect_eq("x2 n=10 lane A", a, obsidio::risk_hash("0.5", 10));
+    expect_eq("x2 n=10 lane B", b, obsidio::risk_hash("0.4821", 10));
+    obsidio::risk_hash_x2("0.5", "none", a, b, 1);
+    expect_eq("x2 n=1 lane A", a, obsidio::risk_hash("0.5", 1));
+    expect_eq("x2 n=1 lane B", b, obsidio::risk_hash("none", 1));
+  }
+
+  // -------------------------------------------------------------------------
+  // A rejected back end is not a correctness failure -- risk.cpp falls back to
+  // the reference chain and every digest above still passes -- but it silently
+  // costs ~7x throughput, which is the whole competition. On an architecture
+  // that HAS an accelerated back end, rejection means the back end is buggy,
+  // and that must fail the build rather than ship quietly slow.
+  std::printf("\nHash back end\n");
+  std::printf("  selected: %s\n", obsidio::risk_backend_name());
+  if (obsidio::risk_backend_rejected()) {
+    std::printf(
+        "  FAIL  an accelerated back end was available but FAILED "
+        "self-verification\n");
+    ++g_failures;
+  }
+
   if (g_failures == 0) {
     std::printf("\nall checks passed\n");
     return 0;

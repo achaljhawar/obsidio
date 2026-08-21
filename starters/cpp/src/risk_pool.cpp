@@ -74,35 +74,56 @@ std::size_t RiskPool::queue_depth() const {
   return queue_.size();
 }
 
+bool RiskPool::expired(const RiskJob& job) const {
+  if (deadline_.count() <= 0) return false;
+  return (std::chrono::steady_clock::now() - job.queued_at) > deadline_;
+}
+
 void RiskPool::worker_loop() {
   deprioritise_current_thread();
 
   for (;;) {
-    RiskJob job;
+    // Take TWO jobs when two are queued. A single chain is latency-bound, so
+    // running a second one interleaved costs ~45% more time and produces two
+    // answers -- roughly 1.45x throughput. Under the graded load the queue sits
+    // ~190 deep at peak, so pairs are essentially always available; the
+    // single-job path is what runs during ramp-up and cool-down.
+    RiskJob jobs[2];
+    int taken = 0;
     {
       std::unique_lock<std::mutex> lock(mutex_);
       cv_.wait(lock, [this] {
         return stopping_.load(std::memory_order_relaxed) || !queue_.empty();
       });
       if (queue_.empty()) return;  // stopping and drained
-      job = std::move(queue_.front());
-      queue_.pop_front();
+      while (taken < 2 && !queue_.empty()) {
+        jobs[taken++] = std::move(queue_.front());
+        queue_.pop_front();
+      }
     }
 
     // A request that has already blown its latency budget scores nothing even
     // if we finish it, and finishing it steals CPU from requests that could
     // still land in time. Shedding it is only worth doing if you can afford the
     // error against the 1% ceiling -- hence disabled by default (deadline 0).
-    if (deadline_.count() > 0) {
-      const auto waited = std::chrono::steady_clock::now() - job.queued_at;
-      if (waited > deadline_) {
-        on_dropped_(job);
+    int live = 0;
+    for (int i = 0; i < taken; ++i) {
+      if (expired(jobs[i])) {
+        on_dropped_(jobs[i]);
         continue;
       }
+      if (live != i) jobs[live] = std::move(jobs[i]);
+      ++live;
     }
 
-    const std::string digest = risk_hash(job.seed);
-    on_done_(job, digest);
+    if (live == 2) {
+      std::string digest_a, digest_b;
+      risk_hash_x2(jobs[0].seed, jobs[1].seed, digest_a, digest_b);
+      on_done_(jobs[0], digest_a);
+      on_done_(jobs[1], digest_b);
+    } else if (live == 1) {
+      on_done_(jobs[0], risk_hash(jobs[0].seed));
+    }
   }
 }
 

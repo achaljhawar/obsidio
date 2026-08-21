@@ -26,6 +26,7 @@
 
 #include "data.hpp"
 #include "http_server.hpp"
+#include "risk.hpp"
 #include "risk_pool.hpp"
 
 namespace {
@@ -132,6 +133,9 @@ bool extract_json_number(std::string_view body, std::string_view key,
 
 int main() {
   obsidio::init_data();
+  // Select and self-verify the hash back end before we accept traffic, so its
+  // cost and any fallback land in the startup log rather than in a request.
+  obsidio::init_risk_backend();
 
   const std::uint16_t port =
       static_cast<std::uint16_t>(env_size("PORT", 8080));
@@ -267,9 +271,10 @@ int main() {
 
   std::fprintf(stderr,
                "obsidio-cpp listening on :%u  io_threads=%zu risk_workers=%zu "
-               "risk_queue=%zu risk_deadline_ms=%zu\n",
+               "risk_queue=%zu risk_deadline_ms=%zu\n"
+               "  hash back end: %s\n",
                static_cast<unsigned>(port), io_threads, risk_workers, risk_queue,
-               risk_deadline_ms);
+               risk_deadline_ms, obsidio::risk_backend_name());
 
   server.run();
   pool.stop();

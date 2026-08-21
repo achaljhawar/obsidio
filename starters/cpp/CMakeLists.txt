@@ -21,6 +21,7 @@ option(OBSIDIO_OPENSSL "Use OpenSSL's SHA-256 (hardware accelerated)" ON)
 set(OBSIDIO_SOURCES
   src/sha256.cpp
   src/risk.cpp
+  src/chain_arm.cpp
   src/data.cpp
   src/http_server.cpp
 )
@@ -28,6 +29,22 @@ set(OBSIDIO_SOURCES
 add_library(obsidio_core STATIC ${OBSIDIO_SOURCES})
 target_include_directories(obsidio_core PUBLIC src)
 target_compile_options(obsidio_core PRIVATE -Wall -Wextra)
+
+# The ARM crypto back end is the ONLY translation unit allowed to contain
+# sha256h/sha256su instructions, so the flag goes on that file alone rather than
+# on the target. Everything else stays baseline-portable, and nothing in this
+# file is reached until arm_crypto_backend() has confirmed HWCAP_SHA2 at
+# runtime -- so the binary still starts on an ARM core without the extension.
+#
+# This is what lets us use the extension without -march=native.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  set_source_files_properties(src/chain_arm.cpp PROPERTIES
+    COMPILE_OPTIONS "-march=armv8-a+crypto")
+  message(STATUS "risk chain: ARMv8 crypto back end compiled in (runtime-gated)")
+else()
+  message(STATUS "risk chain: no accelerated back end for ${CMAKE_SYSTEM_PROCESSOR}"
+                 " -- falling back to per-call SHA-256")
+endif()
 
 if(OBSIDIO_OPENSSL)
   find_package(OpenSSL REQUIRED)
