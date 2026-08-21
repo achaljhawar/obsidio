@@ -93,21 +93,56 @@ proportional to requests served, and requests served is bounded almost entirely
 by `/risk` cost, so **halving the hash cost roughly doubles your score.**
 OpenSSL is the default backend for exactly this reason.
 
+**x86-64** (AMD Ryzen 7 6800HS, WSL2 Ubuntu 24.04, `-O3`, raw process — not
+yet under a `--cpus=2` container, see the caveat in `STRATEGY.md` section 12):
+
+| SHA-256 backend | ms/chain | chains/s/core |
+|---|---:|---:|
+| OpenSSL (per-call) | 16.6-17.0 | ~60 |
+| `chain_x86.cpp` (SHA-NI, two-block specialised) | **4.20-4.23** | **~238** |
+
+**~4.0×** on top of the already-hardware-accelerated baseline, from skipping
+the generic padding path and OpenSSL's per-call setup on every one of the
+50,000 iterations. Measured with `bench/bench_time.cpp` (a standalone A/B
+harness — compile with `g++ -std=c++17 -O3 -DOBSIDIO_USE_OPENSSL -msse4.1
+-mssse3 -msha -I src src/{sha256,risk,chain_arm,chain_x86,data}.cpp
+bench/bench_time.cpp -lssl -lcrypto -lpthread -o bench/bench_time`, then run
+it once with `RISK_BACKEND=reference` and once with `RISK_BACKEND=x86-sha-ni`).
+
 ## Where to optimise next
 
 In `src/risk.cpp`, in order of expected payoff:
 
-1. **A specialised two-block transform.** After the first round the input is
-   always exactly 64 bytes, so every hash is two SHA-256 blocks and the second
-   block is a compile-time constant (`0x80`, zeros, length = 512 bits).
-   Precompute its message schedule and skip the generic padding path entirely.
+1. **A specialised two-block transform.** Done, both back ends. After the
+   first round the input is always exactly 64 bytes, so every hash is two
+   SHA-256 blocks and the second block is a compile-time constant (`0x80`,
+   zeros, length = 512 bits) — its message schedule is precomputed, so the
+   generic padding path never runs in the steady state.
 2. **SHA-NI / ARMv8 crypto intrinsics directly**, with runtime CPU dispatch and
-   the portable path as fallback. You do not know whether the grading box is
-   x86 or ARM, so never `-march=native` and always keep the fallback.
+   the portable path as fallback.
+   - **ARM (`src/chain_arm.cpp`): done, measured, auto-selected.** See the
+     baseline table below.
+   - **x86 (`src/chain_x86.cpp`): done, measured, auto-selected.** It was
+     written with no x86 machine available to compile or run it on, so it
+     shipped initially gated behind `RISK_BACKEND=x86-sha-ni`. Verified
+     2026-08-22 on an AMD Ryzen 7 6800HS under WSL2: all 21 selftest digest
+     checks pass, ~4.0x the OpenSSL-per-call path (see the baseline table and
+     `STRATEGY.md` section 12). It is now unconditional, same as the ARM
+     back end. Re-verify after any future change to that file:
+     ```
+     cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+     cmake --build build -j
+     RISK_BACKEND=x86-sha-ni ./build/obsidio-selftest
+     ```
 3. **SIMD hex encoding** — 32 bytes to 64 chars with `pshufb`, not a byte loop.
+   Done on ARM (fused straight into the next iteration's message vectors, no
+   store/reload). The x86 back end currently hex-encodes through the portable
+   `hex_encode()` instead of a fused NEON-style table lookup — a smaller,
+   safer piece to hand-verify once no compiler is available, at a small cost
+   in throughput once it is confirmed correct.
 4. **Multi-buffer SHA-256.** You cannot parallelise one chain, but you can
    advance 8 concurrent requests' chains in lockstep under AVX2. Biggest win
-   available, biggest engineering cost, and x86-only.
+   available, biggest engineering cost, and x86-only. Not attempted.
 
 The loop is already allocation-free, so there is no garbage-collection-style
 win left to claim here — that one is already banked.

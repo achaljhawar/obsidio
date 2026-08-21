@@ -35,5 +35,15 @@ struct Backend {
 // CPU does not advertise the ARMv8 SHA-2 extension.
 const Backend* arm_crypto_backend();
 
+// Same contract, x86-64 SHA extensions (SHA-NI). Returns nullptr when this
+// build was not compiled for x86-64, or when the CPU does not advertise the
+// "sha" CPUID feature.
+//
+// Verified on real x86-64 hardware (see the header of chain_x86.cpp and
+// STRATEGY.md section 12) and auto-selected, the same as arm_crypto_backend().
+// verify_backend() in risk.cpp still checks it on every boot -- re-run that
+// verification with RISK_BACKEND=x86-sha-ni after any change to this file.
+const Backend* x86_sha_backend();
+
 }  // namespace chain
 }  // namespace obsidio

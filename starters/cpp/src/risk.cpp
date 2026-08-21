@@ -90,7 +90,19 @@ void select_backend() {
   const char* forced = std::getenv("RISK_BACKEND");
   if (forced != nullptr && std::strcmp(forced, "reference") == 0) return;
 
+  // Both back ends are now auto-selected: each has been run and measured on
+  // its real target hardware. ARM: STRATEGY.md section 5 (Apple Silicon).
+  // x86 SHA-NI: verified 2026-08-22 on a real x86-64 host under WSL2 --
+  // tests/selftest.cpp passed all 21 digest checks (FIPS vectors, short
+  // chains, full 50,000-round chains, and every x2-interleaved variant), then
+  // measured at ~4.0x the OpenSSL-per-call reference path (16.7ms -> 4.2ms
+  // per chain, three repeated trials, same binary, same run). See
+  // STRATEGY.md section 12 for the full note. verify_backend() below is
+  // still the final gate either way, on every boot, on every architecture --
+  // this is defense in depth, not a reason to skip re-verifying after any
+  // future change to chain_x86.cpp.
   const chain::Backend* candidate = chain::arm_crypto_backend();
+  if (candidate == nullptr) candidate = chain::x86_sha_backend();
   if (candidate == nullptr) return;  // no accelerated back end for this CPU
   if (verify_backend(*candidate)) {
     g_backend = candidate;

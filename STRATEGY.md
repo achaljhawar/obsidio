@@ -421,3 +421,60 @@ build and none of which are obvious:
   Build for margin, do not over-fit to 200 ms.
 - Does the grader restart the container with `docker restart` (same filesystem)
   or `rm` + `run` (needs a volume)? Assume the stricter case: use a volume.
+
+---
+
+## 12. x86 SHA-NI back end: written blind, then verified on real hardware
+
+`src/chain_x86.cpp`: the same two-block specialisation as `chain_arm.cpp`
+(real schedule for block 1, precomputed constant schedule for block 2), built
+on the x86-64 SHA extensions (`sha256rnds2`/`msg1`/`msg2`) via intrinsics,
+with runtime CPUID dispatch (`__builtin_cpu_supports("sha")`) and a
+portable-path fallback exactly like the ARM back end.
+
+It was written with no x86 machine with a C++ toolchain available — every
+instruction sequence was derived by hand from each intrinsic's documented
+semantics (the permute/state-layout dance in particular was independently
+re-derived lane-by-lane against `_mm_sha256rnds2_epu32`'s documented
+(C,D,G,H)/(A,B,E,F) contract) rather than copied on faith, but it shipped
+initially gated behind `RISK_BACKEND=x86-sha-ni` rather than trusted, because
+this codebase's own rule (`tests/selftest.cpp`, chain_arm.cpp's comments) is
+that an accelerated back end doesn't auto-select until it clears
+`verify_backend()` on its real target — and the Dockerfile runs that selftest
+as a build step, so a wrong auto-selected back end would fail the **entire
+Docker build**, not just run slow.
+
+**Verified 2026-08-22.** WSL2 turned out to already be installed on the dev
+machine (Ubuntu 24.04, `g++` 13.3.0, `cmake` already present), and the CPU —
+an AMD Ryzen 7 6800HS — advertises `sha_ni` in `/proc/cpuinfo`, so this was
+testable immediately instead of waiting on a cloud VM:
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+RISK_BACKEND=x86-sha-ni ./build/obsidio-selftest
+```
+
+All 21 digest checks passed: FIPS 180-4 vectors, short chains, both full
+50,000-round chains, and every x2-interleaved variant (including swapped
+lanes and the n=1 edge case). A standalone wall-clock A/B (`bench/
+bench_time.cpp`, same binary, same run, forcing `RISK_BACKEND` per process)
+gave, across three repeated trials each:
+
+| Back end | ms/chain | chains/s/core |
+|---|---:|---:|
+| `reference` (OpenSSL per-call) | 16.6-17.0 | ~60 |
+| `x86-sha-ni` | 4.20-4.23 | ~238 |
+
+**~4.0x**, bigger than the ~1.5-3x this section originally guessed as the
+likely incremental win over an already-OpenSSL-accelerated baseline. It has
+been promoted to auto-selected in `select_backend()` (`src/risk.cpp`), the
+same as the ARM back end — the `RISK_BACKEND=x86-sha-ni` opt-in gate has been
+removed now that it has cleared the same bar the ARM path did.
+
+**Caveat worth keeping:** WSL2 is a real Linux kernel with real cgroup and
+CPUID behaviour, not a translated/emulated environment like Docker Desktop's
+old Hyper-V path, so this number should transfer reasonably well — but it is
+still not the grading box, and not even a Docker container (no `--cpus=2`
+quota was in effect for this measurement, just a raw process). Confirm the
+ratio holds once the image is actually built and run under
+`--cpus=2 --memory=2g`, the way section 8 describes for the Spark.

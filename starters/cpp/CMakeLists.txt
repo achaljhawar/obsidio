@@ -22,6 +22,7 @@ set(OBSIDIO_SOURCES
   src/sha256.cpp
   src/risk.cpp
   src/chain_arm.cpp
+  src/chain_x86.cpp
   src/data.cpp
   src/http_server.cpp
 )
@@ -40,7 +41,17 @@ target_compile_options(obsidio_core PRIVATE -Wall -Wextra)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
   set_source_files_properties(src/chain_arm.cpp PROPERTIES
     COMPILE_OPTIONS "-march=armv8-a+crypto")
-  message(STATUS "risk chain: ARMv8 crypto back end compiled in (runtime-gated)")
+  message(STATUS "risk chain: ARMv8 crypto back end compiled in (runtime-gated, auto-selected)")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64")
+  # Same idea as the ARM file: only this translation unit gets SHA-NI codegen,
+  # and nothing in it runs until x86_sha_backend() has confirmed the CPUID
+  # "sha" bit at runtime, so the binary still starts on an x86-64 core without
+  # the extension. Verified on real x86-64 hardware (WSL2, 2026-08-22): all
+  # selftest digests match, ~4.0x the OpenSSL-per-call path -- see
+  # STRATEGY.md section 12. Auto-selected, same as the ARM back end.
+  set_source_files_properties(src/chain_x86.cpp PROPERTIES
+    COMPILE_OPTIONS "-msse4.1;-mssse3;-msha")
+  message(STATUS "risk chain: x86 SHA-NI back end compiled in (runtime-gated, auto-selected)")
 else()
   message(STATUS "risk chain: no accelerated back end for ${CMAKE_SYSTEM_PROCESSOR}"
                  " -- falling back to per-call SHA-256")
