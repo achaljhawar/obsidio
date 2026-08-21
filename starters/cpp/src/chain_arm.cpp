@@ -259,8 +259,41 @@ void chain3_impl(const char in_a[64], const char in_b[64], const char in_c[64],
   lane_store_hex(C, out_c);
 }
 
-const Backend kArmBackend = {"armv8-crypto (x3 interleaved)", chain1_impl,
-                             chain2_impl, chain3_impl};
+void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
+                 const char in_d[64], int rounds, char out_a[64],
+                 char out_b[64], char out_c[64], char out_d[64]) {
+  if (rounds <= 0) {
+    std::memcpy(out_a, in_a, 64);
+    std::memcpy(out_b, in_b, 64);
+    std::memcpy(out_c, in_c, 64);
+    std::memcpy(out_d, in_d, 64);
+    return;
+  }
+  Lane A, B, C, D;
+  lane_load(A, in_a);
+  lane_load(B, in_b);
+  lane_load(C, in_c);
+  lane_load(D, in_d);
+  for (int r = 0; r < rounds; ++r) {
+    hash64(A);
+    hash64(B);
+    hash64(C);
+    hash64(D);
+    if (r + 1 < rounds) {
+      digest_to_next_message(A);
+      digest_to_next_message(B);
+      digest_to_next_message(C);
+      digest_to_next_message(D);
+    }
+  }
+  lane_store_hex(A, out_a);
+  lane_store_hex(B, out_b);
+  lane_store_hex(C, out_c);
+  lane_store_hex(D, out_d);
+}
+
+const Backend kArmBackend = {"armv8-crypto (x4 interleaved)", chain1_impl,
+                             chain2_impl, chain3_impl, chain4_impl};
 
 bool cpu_has_sha2() {
 #if defined(__linux__)

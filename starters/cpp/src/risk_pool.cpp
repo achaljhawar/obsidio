@@ -83,15 +83,15 @@ void RiskPool::worker_loop() {
   deprioritise_current_thread();
 
   for (;;) {
-    // Take up to THREE jobs when three are queued. A single chain is
+    // Take up to FOUR jobs when four are queued. A single chain is
     // latency-bound, so extra independent chains interleaved in the same loop
     // ride along in the pipeline bubbles: three cost ~37% more time than one
-    // and produce three answers. This is instruction-level parallelism inside
-    // one thread, NOT extra threads -- the worker count is unchanged and the
-    // 2-CPU cap is untouched. Under the graded load the queue sits deep at
-    // peak, so triples are essentially always available; the x2 and x1 paths
+    // and produce that many answers. This is instruction-level parallelism
+    // inside one thread, NOT extra threads -- the worker count is unchanged and
+    // the 2-CPU cap is untouched. Under the graded load the queue sits deep at
+    // peak, so full batches are essentially always available; the shorter paths
     // are what run during ramp-up and cool-down.
-    RiskJob jobs[3];
+    RiskJob jobs[4];
     int taken = 0;
     {
       std::unique_lock<std::mutex> lock(mutex_);
@@ -99,7 +99,7 @@ void RiskPool::worker_loop() {
         return stopping_.load(std::memory_order_relaxed) || !queue_.empty();
       });
       if (queue_.empty()) return;  // stopping and drained
-      while (taken < 3 && !queue_.empty()) {
+      while (taken < 4 && !queue_.empty()) {
         jobs[taken++] = std::move(queue_.front());
         queue_.pop_front();
       }
@@ -119,7 +119,15 @@ void RiskPool::worker_loop() {
       ++live;
     }
 
-    if (live == 3) {
+    if (live == 4) {
+      std::string digest_a, digest_b, digest_c, digest_d;
+      risk_hash_x4(jobs[0].seed, jobs[1].seed, jobs[2].seed, jobs[3].seed,
+                   digest_a, digest_b, digest_c, digest_d);
+      on_done_(jobs[0], digest_a);
+      on_done_(jobs[1], digest_b);
+      on_done_(jobs[2], digest_c);
+      on_done_(jobs[3], digest_d);
+    } else if (live == 3) {
       std::string digest_a, digest_b, digest_c;
       risk_hash_x3(jobs[0].seed, jobs[1].seed, jobs[2].seed, digest_a, digest_b,
                    digest_c);

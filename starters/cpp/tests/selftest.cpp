@@ -148,6 +148,49 @@ int main() {
     expect_eq("x3 n=1 lane C", c, obsidio::risk_hash("0.4821", 1));
   }
 
+  std::printf("\nRisk chain, x4 interleaved (what the pool runs at peak)\n");
+  {
+    const std::string kSeed05 = obsidio::risk_hash("0.5");
+    const std::string kSeedNone = obsidio::risk_hash("none");
+    const std::string kSeed4821 = obsidio::risk_hash("0.4821");
+    const std::string kSeedPi = obsidio::risk_hash("0.31415");
+    std::string a, b, c, d;
+
+    obsidio::risk_hash_x4("0.5", "none", "0.4821", "0.31415", a, b, c, d);
+    expect_eq("x4 lane A  seed=0.5", a, kSeed05);
+    expect_eq("x4 lane B  seed=none", b, kSeedNone);
+    expect_eq("x4 lane C  seed=0.4821", c, kSeed4821);
+    expect_eq("x4 lane D  seed=0.31415", d, kSeedPi);
+
+    obsidio::risk_hash_x4("0.31415", "0.4821", "none", "0.5", a, b, c, d);
+    expect_eq("x4 rotated A  seed=0.31415", a, kSeedPi);
+    expect_eq("x4 rotated B  seed=0.4821", b, kSeed4821);
+    expect_eq("x4 rotated C  seed=none", c, kSeedNone);
+    expect_eq("x4 rotated D  seed=0.5", d, kSeed05);
+
+    obsidio::risk_hash_x4("0.5", "0.5", "0.5", "0.5", a, b, c, d);
+    expect_eq("x4 same seed all lanes A==B", a, b);
+    expect_eq("x4 same seed all lanes B==C", b, c);
+    expect_eq("x4 same seed all lanes C==D", c, d);
+
+    // Every batch size must agree, or the digest depends on queue depth.
+    std::string ya, yb, yc;
+    obsidio::risk_hash_x3("0.5", "none", "0.4821", ya, yb, yc);
+    obsidio::risk_hash_x4("0.5", "none", "0.4821", "0.31415", a, b, c, d);
+    expect_eq("x4 agrees with x3 lane A", a, ya);
+    expect_eq("x4 agrees with x3 lane B", b, yb);
+    expect_eq("x4 agrees with x3 lane C", c, yc);
+
+    obsidio::risk_hash_x4("0.5", "0.4821", "none", "0.31415", a, b, c, d, 10);
+    expect_eq("x4 n=10 lane A", a, obsidio::risk_hash("0.5", 10));
+    expect_eq("x4 n=10 lane B", b, obsidio::risk_hash("0.4821", 10));
+    expect_eq("x4 n=10 lane C", c, obsidio::risk_hash("none", 10));
+    expect_eq("x4 n=10 lane D", d, obsidio::risk_hash("0.31415", 10));
+    obsidio::risk_hash_x4("0.5", "none", "0.4821", "0.31415", a, b, c, d, 1);
+    expect_eq("x4 n=1 lane A", a, obsidio::risk_hash("0.5", 1));
+    expect_eq("x4 n=1 lane D", d, obsidio::risk_hash("0.31415", 1));
+  }
+
   // -------------------------------------------------------------------------
   // A rejected back end is not a correctness failure -- risk.cpp falls back to
   // the reference chain and every digest above still passes -- but it silently

@@ -92,6 +92,25 @@ bool verify_backend(const chain::Backend& b) {
       return false;
     }
   }
+
+  // And chain4, with a fourth distinct seed.
+  char hd[kSha256HexBytes], od[kSha256HexBytes];
+  first_round("0.271828", hd);
+  for (const int iterations : {1, 2, 12, 33}) {
+    b.chain4(ha, hb, hc, hd, iterations - 1, oa, ob, oc, od);
+    if (chain_reference("0.5", iterations) != std::string(oa, kSha256HexBytes)) {
+      return false;
+    }
+    if (chain_reference("0.9999", iterations) != std::string(ob, kSha256HexBytes)) {
+      return false;
+    }
+    if (chain_reference("0.31415", iterations) != std::string(oc, kSha256HexBytes)) {
+      return false;
+    }
+    if (chain_reference("0.271828", iterations) != std::string(od, kSha256HexBytes)) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -185,6 +204,34 @@ void risk_hash_x3(const std::string& seed_a, const std::string& seed_b,
   out_a.assign(ra, kSha256HexBytes);
   out_b.assign(rb, kSha256HexBytes);
   out_c.assign(rc, kSha256HexBytes);
+}
+
+void risk_hash_x4(const std::string& seed_a, const std::string& seed_b,
+                  const std::string& seed_c, const std::string& seed_d,
+                  std::string& out_a, std::string& out_b, std::string& out_c,
+                  std::string& out_d, int iterations) {
+  init_risk_backend();
+  if (g_backend == nullptr || iterations <= 0) {
+    out_a = risk_hash(seed_a, iterations);
+    out_b = risk_hash(seed_b, iterations);
+    out_c = risk_hash(seed_c, iterations);
+    out_d = risk_hash(seed_d, iterations);
+    return;
+  }
+
+  char sa[kSha256HexBytes], sb[kSha256HexBytes];
+  char sc[kSha256HexBytes], sd[kSha256HexBytes];
+  char ra[kSha256HexBytes], rb[kSha256HexBytes];
+  char rc[kSha256HexBytes], rd[kSha256HexBytes];
+  first_round(seed_a, sa);
+  first_round(seed_b, sb);
+  first_round(seed_c, sc);
+  first_round(seed_d, sd);
+  g_backend->chain4(sa, sb, sc, sd, iterations - 1, ra, rb, rc, rd);
+  out_a.assign(ra, kSha256HexBytes);
+  out_b.assign(rb, kSha256HexBytes);
+  out_c.assign(rc, kSha256HexBytes);
+  out_d.assign(rd, kSha256HexBytes);
 }
 
 }  // namespace obsidio

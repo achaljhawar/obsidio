@@ -38,6 +38,13 @@ void risk_hash_x3(const std::string& seed_a, const std::string& seed_b,
                   std::string& out_b, std::string& out_c,
                   int iterations = kRiskIterations);
 
+// Four chains in lockstep, same contract again. The pool prefers this and
+// steps down through x3, x2, x1 as the queue drains.
+void risk_hash_x4(const std::string& seed_a, const std::string& seed_b,
+                  const std::string& seed_c, const std::string& seed_d,
+                  std::string& out_a, std::string& out_b, std::string& out_c,
+                  std::string& out_d, int iterations = kRiskIterations);
+
 // Selects and self-verifies the hash back end. Called lazily by risk_hash(),
 // but call it explicitly at startup so the cost and any fallback show up before
 // the first request rather than during one.
