@@ -254,6 +254,29 @@ scheduling headroom feeds the hash workers. The default flip still waits for
 the Mac re-check (section 6), because Docker Desktop's port proxy is the one
 thing that could change the IO-thread economics.
 
+### Restart under load (2026-08-22)
+
+The persistence bonus's real cost is not CPU — it is the **error burn during
+the mid-run restart**. k6 has no backoff: a refused connection fails in well
+under a millisecond and the VU immediately retries, so an outage at N VUs
+burns roughly N errors per millisecond-ish. Measured, full ramp with
+`docker restart` fired at t=210s (~150 VUs, climbing to peak):
+
+- Outage window (restart command → first healthy response): **421 ms** —
+  SIGTERM handled promptly plus 5 ms binary startup is what keeps it this
+  short.
+- Error burn: **22,339 refused requests ≈ 0.63%** against the 1% ceiling.
+  **Passed**, along with every latency bar; work_score 8,800,279 (−0.7% vs
+  baseline, noise range). The POSTed price survived the restart.
+
+So the bonus clears on the Spark — with only **~1.6× headroom**. The burn
+scales with VU count and outage length: a restart at the 200-VU peak, or a
+Docker-Desktop restart slower than ~700 ms, blows the ceiling. Two
+consequences: measure the same experiment on the Mac before deciding to
+submit the bonus, and ask the organisers whether the restart happens inside
+the graded run at all (a separate persistence pass makes the whole risk
+vanish).
+
 ### Verification status
 
 **Everything the earlier draft of this section listed as unproven is now
