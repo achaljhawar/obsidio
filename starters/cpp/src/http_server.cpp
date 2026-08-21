@@ -6,8 +6,11 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <string.h>
-#include <sys/epoll.h>
-#include <sys/eventfd.h>
+#if (__linux__)
+  #include <sys/epoll.h>
+  #include <sys/eventfd.h>
+#endif
+
 #include <sys/socket.h>
 #include <unistd.h>
 

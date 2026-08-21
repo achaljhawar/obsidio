@@ -3,6 +3,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <mutex>
 #include <shared_mutex>
 
 namespace obsidio {
