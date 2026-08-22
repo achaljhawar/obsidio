@@ -2,6 +2,11 @@
 
 #include "risk.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+
 #if defined(__linux__)
 #include <sched.h>
 #include <sys/resource.h>
@@ -12,21 +17,75 @@
 namespace obsidio {
 namespace {
 
-// Drop this thread to the weakest scheduling class available. Both calls are
-// permitted for unprivileged processes inside a container -- lowering your own
-// priority never needs CAP_SYS_NICE.
+// How hard to hold the hash workers back, selected by RISK_SCHED.
 //
-// This is what stops a hashing worker from delaying a /price response: when an
-// IO thread becomes runnable the kernel preempts the worker essentially
-// immediately, instead of letting it run out a full CFS timeslice.
-void deprioritise_current_thread() {
+// The original choice was SCHED_IDLE, and it does exactly what it promises:
+// when an IO thread becomes runnable the kernel preempts the worker almost
+// immediately, so /price is answered in microseconds while /risk saturates
+// both cores. What it also does is less obvious. A SCHED_IDLE thread carries
+// scheduler weight 3 against a normal thread's 1024, so while any IO thread is
+// runnable the workers get about 0.3% of the CPU -- not a reduced share,
+// effectively none. The hash workers therefore lose roughly whatever fraction
+// of wall time the IO threads are runnable.
+//
+// That is measurable, and it is large: the risk-only probe reaches ~1097
+// chains/s, while the graded mix sustains ~849 chains/s with the queue never
+// empty. The missing 22.6% is not hashing work that failed to fit, it is
+// hashing capacity handed to the IO threads by the scheduler.
+//
+// The trade being made is worth stating in numbers, because it looks very
+// different once written down: /price p95 measures 336 microseconds against a
+// 200 ms bar -- 595x of headroom -- and a fifth of the score is being spent
+// defending it. Even at 5 ms the margin would still be 40x.
+//
+// So the class is a knob now, not a constant, and the sweep in
+// bench/ryzen/sched_sweep.sh is how the trade gets priced instead of assumed.
+// Default remains SCHED_IDLE: unchanged behaviour until a measurement says
+// otherwise.
+//
+//   RISK_SCHED=idle    SCHED_IDLE, weight 3            (default, as shipped)
+//   RISK_SCHED=batch   SCHED_BATCH, full weight, but never preempts on wake
+//   RISK_SCHED=<0..19> normal class at that nice value; 0 is peer to the IO
+//                      threads, 19 is weakest-but-still-fair (weight 15)
+//
+// All of these lower or keep this thread's own priority, which never requires
+// CAP_SYS_NICE inside a container.
+const char* apply_worker_scheduling() {
 #if defined(__linux__)
-  sched_param param{};
-  param.sched_priority = 0;
-  if (sched_setscheduler(0, SCHED_IDLE, &param) != 0) {
+  const char* raw = std::getenv("RISK_SCHED");
+  const std::string mode = (raw != nullptr && *raw != '\0') ? raw : "idle";
+
+  if (mode == "idle") {
+    sched_param param{};
+    param.sched_priority = 0;
+    if (sched_setscheduler(0, SCHED_IDLE, &param) == 0) return "idle";
     // SCHED_IDLE unavailable (some sandboxes); fall back to max niceness.
     setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 19);
+    return "nice19 (SCHED_IDLE unavailable)";
   }
+
+  if (mode == "batch") {
+    sched_param param{};
+    param.sched_priority = 0;
+    if (sched_setscheduler(0, SCHED_BATCH, &param) == 0) return "batch";
+    return "normal (SCHED_BATCH unavailable)";
+  }
+
+  // Anything else is read as a nice value. An unparseable or out-of-range
+  // value is clamped rather than ignored, so a typo degrades predictably
+  // instead of silently leaving the worker at normal priority.
+  char* end = nullptr;
+  long nice_value = std::strtol(mode.c_str(), &end, 10);
+  if (end == mode.c_str()) nice_value = 19;
+  if (nice_value < 0) nice_value = 0;
+  if (nice_value > 19) nice_value = 19;
+  setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)),
+              static_cast<int>(nice_value));
+  static thread_local char label[16];
+  std::snprintf(label, sizeof(label), "nice%ld", nice_value);
+  return label;
+#else
+  return "unsupported";
 #endif
 }
 
@@ -82,7 +141,15 @@ bool RiskPool::expired(const RiskJob& job) const {
 }
 
 void RiskPool::worker_loop() {
-  deprioritise_current_thread();
+  // Report the applied class once, from the first worker only: the startup
+  // banner is the single place anyone looks to find out what is actually
+  // running, and a sweep that silently failed to apply its setting would
+  // otherwise look like a null result.
+  const char* applied = apply_worker_scheduling();
+  static std::once_flag announced;
+  std::call_once(announced, [applied] {
+    std::fprintf(stderr, "risk workers: scheduling=%s\n", applied);
+  });
 
   for (;;) {
     // Take up to FOUR jobs when four are queued. A single chain is
