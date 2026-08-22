@@ -83,9 +83,16 @@ Both mechanisms lower their priority; they do not require permission to raise
 priority. When an IO thread becomes runnable, Linux can schedule it ahead of
 the CPU-bound hash workers.
 
-The pool consumes up to four queued jobs at a time and dispatches the widest
-verified chain function available. Near queue drain it steps down through
-three, two, and one lane rather than waiting for a full batch.
+The pool batches to `Backend::lanes`, the width the selected back end genuinely
+advances in lockstep, rather than to the widest chain function that exists. On
+x86 that is eight; below a full group it falls back to pairs, because the
+sub-eight compositions there are pairs. On ARM it is four with real three- and
+two-lane kernels beneath it. Near queue drain it runs what it has rather than
+waiting for a partner.
+
+The distinction is measurable rather than cosmetic: a three-job group on a
+width-two back end composes to a pair plus a single, and the odd chain running
+alone made that group 39% worse than a two-job group.
 
 ### Why interleaving matters
 
@@ -95,9 +102,17 @@ chains in lockstep lets one lane issue useful work while another waits on its
 dependency.
 
 - ARMv8 has enough vector registers for a true four-lane interleave.
-- x86-64 has 16 XMM registers and an implicit `XMM0` operand in
-  `SHA256RNDS2`; the current kernel keeps two lanes resident, implements three
-  lanes as pair-plus-single, and four lanes as two pairs.
+- x86-64 has 16 XMM registers and an implicit `XMM0` operand in `SHA256RNDS2`,
+  which caps a register-resident kernel at two lanes: `chain2` keeps two lanes
+  and their schedules in registers, `chain3` is pair-plus-single, `chain4` is
+  two pairs.
+- `chain8` lifts that cap by not keeping the schedule in registers at all. Each
+  lane's message is expanded into an L1-resident `W+K` buffer, the rounds then
+  read that buffer at two registers per lane, and the two phases are pipelined
+  across lane groups — `rounds(A)` co-issued with `schedule(B)`, then
+  `rounds(B)` with `schedule(A')` — so the schedule keeps hiding inside
+  `SHA256RNDS2` latency instead of becoming a phase that has to be paid for.
+  Measured at 1.58x `chain2` on a Ryzen 7 170.
 - CPUs without a supported extension use the verified reference fallback.
 
 The first hash accepts an arbitrary seed length. Every later hash receives the
@@ -233,12 +248,29 @@ Do not use the sanitizer build for performance measurements.
 
 ### Load test
 
-With the service running:
+With the service running and k6 on the host:
 
 ```bash
 cd ../../k6
 k6 run -e TARGET=http://127.0.0.1:8080 grading.js
 ```
+
+Or entirely in Docker, which needs nothing installed and keeps the load
+generator off the service's cores — the form every recorded number used:
+
+```bash
+docker network create obsidio-grade
+docker run -d --name sut --network obsidio-grade --cpus=2 --memory=2g obsidio-cpp
+docker run --rm --network obsidio-grade --cpuset-cpus=8-15 \
+  -v "$(pwd)/k6:/scripts:ro" -e TARGET=http://sut:8080 \
+  grafana/k6:latest run /scripts/grading.js
+docker rm -f sut && docker network rm obsidio-grade
+```
+
+Run that from the repository root, and on Windows Git Bash prefix it with
+`MSYS_NO_PATHCONV=1` and use `$(pwd -W)`. `bench/ryzen/README.md` covers the
+alternated A/B harness, which is the right instrument for anything smaller than
+about 10% — the full grading script is too noisy to resolve it.
 
 The checked-in script currently awards `work_score` for HTTP 200 responses; it
 does not independently validate JSON bodies or require each scored request to
@@ -250,18 +282,26 @@ add stricter checks before relying on the script as a correctness oracle.
 Results are kept as dated evidence because absolute scores depend heavily on
 hardware and thermal state:
 
-- [ARM strategy notes](../../docs/history/arm64-strategy-notes.md) — ARMv8
-  optimization ladder and four-lane measurements.
-- [x86 coarse audit](../../docs/history/x86-coarse-audit.md) — first native x86
-  execution and controlled comparison with the reference fallback.
-- [x86 session findings](../../docs/history/x86-session-findings.md) — fused
-  two-lane work, head-to-head comparison, rejected AVX2 experiment, and thermal
-  findings.
+- [Phase-split kernel](../../docs/phase-split-kernel.md) — design brief for
+  `chain8`, both retracted stages included.
+- [Phase-split negative result](../../docs/phase-split-negative-result.md) —
+  the sequential form rejected at +6.2%, and §6a on the pipelined form that
+  passed its gate and shipped.
+- [Wide block 2](../../docs/wide-block2-negative-result.md) — a correctly
+  measured projection that still missed by 45 points, and why.
+- [Ryzen ceiling findings](../../docs/history/ryzen-ceiling-findings.md) —
+  `SHA256RNDS2` established as latency bound (L=4, T=1), plus the scheduler and
+  `IO_THREADS` levers closed negative.
+- [ARM strategy notes](../../docs/history/arm64-strategy-notes.md),
+  [x86 coarse audit](../../docs/history/x86-coarse-audit.md), and
+  [x86 session findings](../../docs/history/x86-session-findings.md) — the
+  earlier ladders.
 
-The current x86 kernel and the independently developed fused kernel were within
-roughly one to two percent in alternated measurements, which was inside observed
-run-to-run noise. Keep the implementation on `main`; keep the reports as the
-evidence trail.
+Two rules the record enforces on itself: no projection assembled from
+separately measured halves decides anything, because two of them have now been
+built and measured wrong; and negative results stay in the tree with their
+diagnostics, because they are what stops the next person paying for the same
+experiment.
 
 ## Known gaps
 

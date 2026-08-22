@@ -64,16 +64,36 @@ curl 'http://127.0.0.1:8080/stats?symbol=AAPL'
 curl 'http://127.0.0.1:8080/risk?seed=0.5'
 ```
 
-Run the published workload after the container becomes healthy:
+### Running the graded workload
+
+With k6 installed on the host:
 
 ```bash
 cd k6
 k6 run -e TARGET=http://127.0.0.1:8080 grading.js
 ```
 
-The container and k6 compete for CPU if they run on the same machine. That is
-fine for a smoke test, but performance results should be collected with the
-load generator on separate cores or a separate host.
+Nothing needs to be installed for the all-Docker form, which is how every
+number in this repository was produced. The load generator is pinned to cores
+the service does not use, and both sides talk over a user-defined bridge so no
+host port proxy sits in the path:
+
+```bash
+docker network create obsidio-grade
+docker run -d --name sut --network obsidio-grade --cpus=2 --memory=2g obsidio-cpp
+docker run --rm --network obsidio-grade --cpuset-cpus=8-15 \
+  -v "$(pwd)/k6:/scripts:ro" -e TARGET=http://sut:8080 \
+  grafana/k6:latest run /scripts/grading.js
+docker rm -f sut && docker network rm obsidio-grade
+```
+
+From Git Bash on Windows, prefix the `-v` command with `MSYS_NO_PATHCONV=1` and
+use `$(pwd -W)`, or the mount path is rewritten and k6 runs an empty directory.
+
+Adjust `--cpuset-cpus` to cores this machine actually has. The container and k6
+compete for CPU when they share cores, which is fine for a smoke test and not
+fine for a measurement: quote scores only from runs where they are separated,
+on a cool machine, on mains power.
 
 ## Endpoint contract
 
@@ -109,11 +129,15 @@ Linux epoll IO threads ────────► /health, /price, /stats
 - Two explicitly configured epoll threads own sockets and serve the fast paths.
 - Two `SCHED_IDLE` risk workers consume a bounded queue, allowing runnable IO
   work to pre-empt hashing.
-- Risk jobs are batched into one-to-four independent chains to expose
-  instruction-level parallelism without adding threads.
+- Risk jobs are batched into independent chains advanced in lockstep, which
+  exposes instruction-level parallelism without adding threads. The batch width
+  follows the back end's real lane width — eight on x86 through the pipelined
+  phase-split kernel, four on ARM — never the widest entry point that happens
+  to exist.
 - Runtime dispatch selects ARMv8 SHA2, x86 SHA-NI, or the specialized reference
   fallback. Accelerated paths verify themselves against a deliberately plain
-  oracle before serving traffic.
+  oracle before serving traffic, and a lane that fails is disabled on its own
+  rather than taking the back end down with it.
 - The Docker build runs the correctness suite under automatic selection, the
   reference fallback, and each named accelerated backend when available.
 
@@ -146,16 +170,27 @@ targeted a deleted Node/Postgres system and did not describe this submission.
 The repository records results rather than presenting one hardware-dependent
 number as universal:
 
-- [ARM strategy notes](docs/history/arm64-strategy-notes.md) record the original
-  ARMv8 four-lane optimization ladder.
-- [x86 coarse audit](docs/history/x86-coarse-audit.md) records the first real
-  x86 execution, correctness checks, and controlled backend comparison.
-- [x86 session findings](docs/history/x86-session-findings.md) record the fused
-  two-lane SHA-NI work, head-to-head comparison, and thermal-throttling lesson.
+- [Phase-split kernel](docs/phase-split-kernel.md) — the design brief for the
+  eight-lane x86 kernel, with both retracted stages left in place.
+- [Phase-split negative result](docs/phase-split-negative-result.md) — the
+  sequential version measured at +6.2% against a +15% floor and rejected, then
+  §6a on the pipelined variant that passed and shipped.
+- [Wide block 2](docs/wide-block2-negative-result.md) — a projection that was
+  built and measured at −23%, with the diagnostic that explains it.
+- [Ryzen ceiling findings](docs/history/ryzen-ceiling-findings.md) — the
+  session that established `SHA256RNDS2` as latency bound and closed the
+  scheduler and `IO_THREADS` levers.
+- [ARM strategy notes](docs/history/arm64-strategy-notes.md),
+  [x86 coarse audit](docs/history/x86-coarse-audit.md), and
+  [x86 session findings](docs/history/x86-session-findings.md) record the
+  earlier ARM and x86 ladders.
 
-The strongest portable conclusion is architectural: interleaving independent
-chains removes dependency stalls. Absolute k6 scores vary substantially with
-CPU model, virtualization, power policy, and thermal state.
+On a Ryzen 7 170 under Docker Desktop the current tree grades at `work_score`
+7,365,605 with all four latency thresholds green and no failed requests,
+against 5,818,877 for the same tree before the eight-lane kernel. Both figures
+are one laptop: absolute k6 scores move substantially with CPU model,
+virtualization, power policy, and thermal state, so the portable claims are the
+ratios and the reasoning, not the numbers.
 
 ## Known limitations
 
