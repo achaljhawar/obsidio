@@ -97,3 +97,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   # The suite binds a fixed port, so it must not race another copy of itself.
   set_tests_properties(http_input PROPERTIES RUN_SERIAL TRUE TIMEOUT 120)
 endif()
+
+# Before/after for the four-lane block-2 kernel. Not part of the image: it runs
+# both paths in one process through the public API (two risk_hash_x2 calls are
+# exactly the old chain4), so the comparison is immune to the clock drift that
+# makes end-to-end A/B unreliable on a laptop.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64"
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/x86/bench_wide_block2.cpp")
+  add_executable(obsidio-bench-wide-block2 bench/x86/bench_wide_block2.cpp)
+  target_link_libraries(obsidio-bench-wide-block2 PRIVATE obsidio_core)
+  target_compile_options(obsidio-bench-wide-block2 PRIVATE -O2)
+endif()
