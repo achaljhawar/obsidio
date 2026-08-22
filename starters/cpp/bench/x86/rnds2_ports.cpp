@@ -33,10 +33,20 @@
 // message schedule out of the round phase, so a lane costs 2 registers during
 // the rounds instead of 6).
 //
-// Test 3 answers a second dead question: whether an AVX2 multi-buffer hash
-// could run *alongside* SHA-NI rather than instead of it. That idea was killed
-// on the assumption that SHA-NI saturates its ports; if it is latency bound
-// there are spare ports, and the hybrid reopens.
+// Test 3 was meant to answer a second dead question: whether an AVX2
+// multi-buffer hash could run *alongside* SHA-NI rather than instead of it.
+// That idea was killed on the assumption that SHA-NI saturates its ports; if
+// it is latency bound there are spare ports, and the hybrid reopens.
+//
+// It does not answer that, and the arm below is kept only because what it does
+// measure is worth knowing. SHA256RNDS2 has no VEX encoding, so it is
+// legacy-SSE and leaves the upper YMM halves dirty; interleaving it with
+// VEX-256 in one loop pays an AVX/SSE transition every iteration. The -98%
+// this prints is that transition, not port contention -- bench/x86/
+// avx_transition.cpp separates the two directly, and the same experiment with
+// 128-bit co-issue costs 0-11%. Read this arm as "do not put AVX2 next to
+// rnds2", which is true and useful; it says nothing either way about the
+// hybrid, and the ports are demonstrably not saturated.
 //
 // Build: this is not part of the server. See bench/x86/README.md.
 #include <cstdint>
@@ -99,10 +109,12 @@ double run_chains(int iters) {
   return static_cast<double>(iters) * N / secs;  // rnds2 per second
 }
 
-// Same, with an independent AVX2 stream co-issued. If SHA-NI is port bound the
-// two fight and rnds2 throughput drops; if it is latency bound the AVX2 work
-// slots into the gaps almost for free. That difference is exactly the
-// feasibility of a SHA-NI + AVX2 hybrid.
+// Same, with an independent AVX2 stream co-issued. This was written to read as
+// port pressure -- the two fight, or the AVX2 work slots into the gaps -- but
+// it cannot: the 256-bit stream dirties the YMM uppers that legacy-SSE rnds2
+// then writes, so the result is dominated by the AVX/SSE transition and the
+// ports never get a say. What it measures is the cost of mixing VEX-256 with
+// rnds2 in one loop, which is a real thing to know and a large one.
 template <int N>
 double run_chains_with_avx2(int iters) {
   __m128i s0[N], s1[N];
@@ -123,7 +135,9 @@ double run_chains_with_avx2(int iters) {
       s0[i] = _mm_sha256rnds2_epu32(s0[i], s1[i], k);
     }
     // Four independent AVX2 adds per rnds2 round: enough to compete for vector
-    // issue slots without creating a dependency of its own.
+    // issue slots without creating a dependency of its own -- and, unavoidably,
+    // enough to dirty the YMM uppers on every iteration. Use the 128-bit arm in
+    // avx_transition.cpp if what you want is issue pressure without that.
     a0 = _mm256_add_epi32(a0, one);
     a1 = _mm256_add_epi32(a1, one);
     a2 = _mm256_add_epi32(a2, one);
@@ -228,7 +242,9 @@ int main() {
   }
 
   if (__builtin_cpu_supports("avx2")) {
-    std::printf("\nPort contention: SHA-NI with an AVX2 stream co-issued\n");
+    std::printf(
+        "\nAVX/SSE transition: SHA-NI with a VEX-256 AVX2 stream co-issued\n"
+        "  (NOT a port-contention measurement -- see avx_transition.cpp)\n");
     const double solo2 = t[2];
     const double solo4 = t[4];
     const double mix2 = best_chains_avx2<2>();
@@ -241,12 +257,18 @@ int main() {
     std::printf("\n  ");
     if (worst > 0.95) {
       std::printf(
-          "AVX2 work is nearly free alongside SHA-NI: the vector ports have\n"
-          "  slack. A SHA-NI + AVX2 multi-buffer hybrid is worth reopening.\n");
+          "VEX-256 work is nearly free alongside SHA-NI, so this CPU is not\n"
+          "  paying a transition penalty. Run obsidio-avx-transition to confirm\n"
+          "  before reading anything into it.\n");
     } else {
       std::printf(
-          "AVX2 steals from SHA-NI (worst case %.0f%% of solo). They compete\n"
-          "  for issue slots; the hybrid stays dead.\n",
+          "VEX-256 leaves SHA-NI at %.1f%% of its solo rate, worst case. That\n"
+          "  is the AVX/SSE transition penalty, not port contention: rnds2 has\n"
+          "  no VEX encoding, so every iteration crosses between dirty-upper\n"
+          "  YMM state and a legacy-SSE write. obsidio-avx-transition runs the\n"
+          "  same co-issue at 128 bits and it costs 0-11%%, which is what the\n"
+          "  ports actually have to say. Keep AVX2 away from the kernel -- but\n"
+          "  do not read this as the hybrid being closed.\n",
           100.0 * worst);
     }
   } else {

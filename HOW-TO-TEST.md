@@ -75,9 +75,14 @@ docker run --rm obsidio-build ./build/obsidio-rnds2-ports
      highest-value thing left.
 2. The `vs 1 lane` column — should rise then flatten. Where it flattens *is* the
    answer; the printed verdict is just reading the same curve.
-3. The **port contention** section at the bottom. If AVX2 work costs SHA-NI
-   almost nothing, there are spare vector issue slots and the SHA-NI + AVX2
-   hybrid (previously killed on the assumption of port saturation) reopens.
+3. The **AVX/SSE transition** section at the bottom — and note that it does
+   *not* answer the port-saturation question it was written for. `rnds2` has no
+   VEX encoding, so co-issuing VEX-256 pays a transition penalty every
+   iteration and the ~−98% it reports is that, not contention. Run
+   `docker run --rm obsidio-build ./build/obsidio-avx-transition` for the
+   question actually being asked: 128-bit co-issue costs 0–11% on this CPU, so
+   the vector ports have slack and the SHA-NI + AVX2 hybrid is **not** closed
+   by this evidence. Everything near the kernel still stays 128-bit.
 
 Run it **twice** and confirm `lanes to saturate` agrees. If the two runs
 disagree, the machine is too noisy — cool it down and retry.
