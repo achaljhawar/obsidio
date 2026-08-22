@@ -90,6 +90,14 @@ struct Server::Connection {
   std::size_t out_sent = 0;
   bool deferred = false;   // waiting on a worker; not in the epoll set
   bool close_after = false;
+  // Torn down, but not yet reclaimed -- see close_connection().
+  bool closed = false;
+  // The event mask currently registered with epoll for this fd, or 0 when the
+  // fd is not in the set at all. Lets arm() skip epoll_ctl entirely when the
+  // interest set already is what we want, which is every successful flush on a
+  // keep-alive connection: one of the ~3 syscalls per request, and the
+  // response path is 60% of the scored weight.
+  std::uint32_t armed = 0;
 };
 
 struct Server::Loop {
@@ -99,6 +107,13 @@ struct Server::Loop {
   int wake_fd = -1;  // eventfd signalling deferred completions
   std::thread thread;
   std::unordered_map<int, std::unique_ptr<Connection>> connections;
+
+  // Every connection event carries its Connection* in epoll_event::data.ptr,
+  // so the two fds that have no Connection need some other identity. Their
+  // events carry the address of one of these instead; both are compared by
+  // address only, and the values are never read.
+  char listen_tag = 0;
+  char wake_tag = 0;
 
   struct Completion {
     int fd;
@@ -191,12 +206,15 @@ bool Server::start() {
       return false;
     }
 
+    // The Loop itself is heap-allocated and never moves, so the addresses of
+    // its tag members stay valid for the lifetime of the epoll set even though
+    // the owning unique_ptr moves into loops_ below.
     epoll_event ev{};
     ev.events = EPOLLIN;
-    ev.data.fd = loop->listen_fd;
+    ev.data.ptr = &loop->listen_tag;
     ::epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, loop->listen_fd, &ev);
 
-    ev.data.fd = loop->wake_fd;
+    ev.data.ptr = &loop->wake_tag;
     ::epoll_ctl(loop->epoll_fd, EPOLL_CTL_ADD, loop->wake_fd, &ev);
 
     loops_.push_back(std::move(loop));
@@ -244,10 +262,44 @@ void Server::loop_main(std::size_t index) {
   Loop& loop = *loops_[index];
   epoll_event events[kMaxEvents];
 
-  auto close_connection = [&](int fd) {
-    ::epoll_ctl(loop.epoll_fd, EPOLL_CTL_DEL, fd, nullptr);
-    loop.connections.erase(fd);
-    ::close(fd);
+  // Make `wanted` this connection's epoll interest set. Does nothing when that
+  // is already the registered set -- the case that matters, because flush()
+  // ends every keep-alive request wanting exactly the EPOLLIN it already has.
+  // ADD when the fd is outside the set (fresh accept, or handed back by a
+  // worker), MOD otherwise. Returns false only if epoll_ctl failed.
+  auto arm = [&](Connection* conn, std::uint32_t wanted) -> bool {
+    if (conn->armed == wanted) return true;
+    epoll_event ev{};
+    ev.events = wanted;
+    ev.data.ptr = conn;
+    const int op = conn->armed == 0 ? EPOLL_CTL_ADD : EPOLL_CTL_MOD;
+    if (::epoll_ctl(loop.epoll_fd, op, conn->fd, &ev) != 0) return false;
+    conn->armed = wanted;
+    return true;
+  };
+
+  auto disarm = [&](Connection* conn) {
+    if (conn->armed == 0) return;
+    ::epoll_ctl(loop.epoll_fd, EPOLL_CTL_DEL, conn->fd, nullptr);
+    conn->armed = 0;
+  };
+
+  // Connections torn down during the current batch of events. Reclaiming a
+  // Connection the moment it dies is not safe now that events carry raw
+  // Connection pointers: epoll_wait already snapshotted this batch, so a later
+  // event in it can name a connection that an earlier one killed (a completion
+  // drained on wake_fd closes arbitrary connections, and any of them may have
+  // their own EPOLLIN sitting further down the same array). Holding the fd
+  // open until the batch drains additionally stops accept4() from handing the
+  // same descriptor number to a new connection, which would alias a stale
+  // event -- a stale EPOLLHUP included -- onto a live one.
+  std::vector<int> pending_close;
+
+  auto close_connection = [&](Connection* conn) {
+    if (conn->closed) return;
+    conn->closed = true;
+    disarm(conn);
+    pending_close.push_back(conn->fd);
   };
 
   // Flush conn->out. Returns false if the connection died.
@@ -260,10 +312,7 @@ void Server::loop_main(std::size_t index) {
         continue;
       }
       if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        epoll_event ev{};
-        ev.events = EPOLLIN | EPOLLOUT;
-        ev.data.fd = conn->fd;
-        ::epoll_ctl(loop.epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
+        arm(conn, static_cast<std::uint32_t>(EPOLLIN | EPOLLOUT));
         return true;  // finish later
       }
       if (n < 0 && errno == EINTR) continue;
@@ -274,10 +323,9 @@ void Server::loop_main(std::size_t index) {
     conn->out_sent = 0;
     if (conn->close_after) return false;
 
-    epoll_event ev{};
-    ev.events = EPOLLIN;
-    ev.data.fd = conn->fd;
-    ::epoll_ctl(loop.epoll_fd, EPOLL_CTL_MOD, conn->fd, &ev);
+    // Usually a no-op: EPOLLOUT is only ever armed by the partial-write branch
+    // above, so the interest set is already EPOLLIN on the common path.
+    arm(conn, static_cast<std::uint32_t>(EPOLLIN));
     return true;
   };
 
@@ -445,7 +493,7 @@ void Server::loop_main(std::size_t index) {
         // A worker owns this connection now. Take it out of the epoll set so
         // this thread will not touch it until complete() hands it back.
         conn->deferred = true;
-        ::epoll_ctl(loop.epoll_fd, EPOLL_CTL_DEL, conn->fd, nullptr);
+        disarm(conn);
         return true;
       }
 
@@ -487,10 +535,10 @@ void Server::loop_main(std::size_t index) {
       conn->fd = fd;
       conn->in.reserve(kReadChunk);
 
-      epoll_event ev{};
-      ev.events = EPOLLIN;
-      ev.data.fd = fd;
-      if (::epoll_ctl(loop.epoll_fd, EPOLL_CTL_ADD, fd, &ev) != 0) {
+      // arm() before the map takes ownership, so a failed ADD costs only the
+      // fd -- the Connection is dropped here rather than needing an erase.
+      Connection* raw = conn.get();
+      if (!arm(raw, static_cast<std::uint32_t>(EPOLLIN))) {
         ::close(fd);
         continue;
       }
@@ -508,6 +556,8 @@ void Server::loop_main(std::size_t index) {
       auto it = loop.connections.find(done.fd);
       if (it == loop.connections.end()) continue;  // already gone
       Connection* conn = it->second.get();
+      // Torn down earlier in this batch and awaiting reclamation.
+      if (conn->closed) continue;
 
       conn->deferred = false;
       conn->close_after = !done.keep_alive;
@@ -515,20 +565,17 @@ void Server::loop_main(std::size_t index) {
       conn->out_sent = 0;
 
       // Back into the epoll set before writing, so a partial write can arm
-      // EPOLLOUT.
-      epoll_event ev{};
-      ev.events = EPOLLIN;
-      ev.data.fd = conn->fd;
-      ::epoll_ctl(loop.epoll_fd, EPOLL_CTL_ADD, conn->fd, &ev);
+      // EPOLLOUT. process() disarmed it when it deferred, so this is an ADD.
+      arm(conn, static_cast<std::uint32_t>(EPOLLIN));
 
       // flush() returns false once a close_after response is fully drained;
       // checking close_after here as well would tear the connection down in
       // the middle of a partial write and truncate the response.
       if (!flush(conn)) {
-        close_connection(done.fd);
+        close_connection(conn);
         continue;
       }
-      if (!process(conn)) close_connection(done.fd);
+      if (!process(conn)) close_connection(conn);
     }
   };
 
@@ -540,14 +587,14 @@ void Server::loop_main(std::size_t index) {
     }
 
     for (int i = 0; i < n; ++i) {
-      const int fd = events[i].data.fd;
+      void* const tag = events[i].data.ptr;
 
-      if (fd == loop.listen_fd) {
+      if (tag == &loop.listen_tag) {
         accept_new();
         continue;
       }
 
-      if (fd == loop.wake_fd) {
+      if (tag == &loop.wake_tag) {
         std::uint64_t counter = 0;
         while (::read(loop.wake_fd, &counter, sizeof(counter)) > 0) {
         }
@@ -555,12 +602,14 @@ void Server::loop_main(std::size_t index) {
         continue;
       }
 
-      auto it = loop.connections.find(fd);
-      if (it == loop.connections.end()) continue;
-      Connection* conn = it->second.get();
+      // Everything else is a connection, named directly rather than through a
+      // hash of its fd. Safe against a stale pointer because close_connection()
+      // defers reclamation past the end of this batch.
+      Connection* conn = static_cast<Connection*>(tag);
+      if (conn->closed) continue;
 
       if (events[i].events & (EPOLLHUP | EPOLLERR)) {
-        if (!conn->deferred) close_connection(fd);
+        if (!conn->deferred) close_connection(conn);
         continue;
       }
 
@@ -568,7 +617,7 @@ void Server::loop_main(std::size_t index) {
         // Same rule as drain_completions: only a finished (or dead) flush may
         // close -- flush() itself signals that by returning false.
         if (!flush(conn)) {
-          close_connection(fd);
+          close_connection(conn);
           continue;
         }
         // Draining may have unblocked requests that were already read into
@@ -578,7 +627,7 @@ void Server::loop_main(std::size_t index) {
         // here, pipelined requests behind a backpressured write are never
         // answered at all.
         if (conn->out.empty() && !conn->deferred && !process(conn)) {
-          close_connection(fd);
+          close_connection(conn);
           continue;
         }
       }
@@ -601,11 +650,19 @@ void Server::loop_main(std::size_t index) {
         }
         if (alive) alive = process(conn);
         if (!alive && !conn->deferred) {
-          close_connection(fd);
+          close_connection(conn);
           continue;
         }
       }
     }
+
+    // End of batch: no pointer from `events` is live any more, so the closed
+    // connections can be freed and their descriptors released for reuse.
+    for (const int fd : pending_close) {
+      ::close(fd);
+      loop.connections.erase(fd);
+    }
+    pending_close.clear();
   }
 
   // Teardown: deferred connections are closed by the worker's completion path
