@@ -1,10 +1,5 @@
-// Bounded work queue for /risk.
-//
-// This is the piece that keeps the fast path fast. /price and /stats are
-// handled inline on the IO threads in microseconds; /risk is handed off here so
-// it can never occupy an IO thread. Worker threads additionally drop to the
-// lowest scheduler priority the kernel offers, so the moment an IO thread has
-// work the kernel preempts a hashing worker.
+// Bounded work queue for /risk. Keeps hashing off the IO threads, and workers
+// run at the lowest scheduler priority so IO preempts them instantly.
 #pragma once
 
 #include <atomic>
@@ -21,17 +16,17 @@
 namespace obsidio {
 
 struct RiskJob {
-  int fd = -1;
-  int loop_index = 0;  // which IO thread owns this connection
+  int fd{-1};
+  int loop_index{};  // which IO thread owns this connection
   std::string seed;
-  bool keep_alive = true;
+  bool keep_alive{true};
   std::chrono::steady_clock::time_point queued_at;
 };
 
 class RiskPool {
  public:
-  // `on_done` is invoked on a worker thread with the job and its digest.
-  // `on_dropped` is invoked when a job is shed past its deadline.
+  // `on_done` runs on a worker thread with the job and its digest;
+  // `on_dropped` when a job is shed past its deadline.
   RiskPool(std::size_t workers, std::size_t max_queue,
            std::chrono::milliseconds deadline,
            std::function<void(const RiskJob&, const std::string&)> on_done,
@@ -41,17 +36,14 @@ class RiskPool {
   RiskPool(const RiskPool&) = delete;
   RiskPool& operator=(const RiskPool&) = delete;
 
-  // Returns false if the queue is full (caller should shed with 503).
+  // Returns false if the queue is full (caller sheds with 503).
   bool submit(RiskJob job);
 
-  // Signals workers to exit. Async-signal-safe (one atomic store): this is
-  // what the signal handler calls, because joining threads from a signal
-  // handler is not -- if SIGTERM lands on a worker thread, join() would target
-  // itself and std::terminate the process mid-restart.
+  // Signals workers to exit. Async-signal-safe: one atomic store, no joins --
+  // SIGTERM landing on a worker must not make join() target itself.
   void request_stop();
 
-  // Joins all workers. Call only from a normal thread (main), never from a
-  // signal handler.
+  // Joins all workers. Never call from a signal handler.
   void stop();
 
   std::size_t queue_depth() const;

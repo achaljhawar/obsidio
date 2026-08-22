@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 
 #include "chain_backend.hpp"
 #include "sha256.hpp"
@@ -11,13 +12,9 @@
 namespace obsidio {
 namespace {
 
-// The reference chain: one generic library call per iteration. This is the
-// ORACLE -- the thing every accelerated back end is checked against in
-// verify_backend() -- and it is deliberately the slowest, plainest expression
-// of the spec. It is never used to serve a request.
-//
-// Do not "optimise" this. Its only job is to be obviously correct, and it costs
-// nothing: verify_backend() runs it for at most 65 iterations, once, at start.
+// The oracle every accelerated back end is checked against: one generic library
+// call per round, deliberately the plainest expression of the spec. Never
+// serves a request, so leave it slow and obviously correct.
 std::string chain_reference(const std::string& seed, int iterations) {
   if (iterations <= 0) return seed;
 
@@ -27,23 +24,18 @@ std::string chain_reference(const std::string& seed, int iterations) {
   sha256(reinterpret_cast<const std::uint8_t*>(seed.data()), seed.size(), digest);
   hex_encode(digest, kSha256DigestBytes, hex);
 
-  for (int i = 1; i < iterations; ++i) {
+  for (int i{1}; i < iterations; ++i) {
     sha256(reinterpret_cast<const std::uint8_t*>(hex), kSha256HexBytes, digest);
     hex_encode(digest, kSha256DigestBytes, hex);
   }
   return std::string(hex, kSha256HexBytes);
 }
 
-// The serving fallback, used when no accelerated back end qualifies: an x86
-// grading box, an ARM core without HWCAP_SHA2, RISK_BACKEND=reference, or a
-// back end that failed verification. Same digest as chain_reference(), but the
-// 49,999 hot rounds go through the specialised 64-byte transform instead of the
-// one-shot API and its per-call provider fetch. Roughly 5x.
+// The serving fallback when no accelerated back end qualifies. Same digests as
+// chain_reference but through the specialised 64-byte transform, roughly 5x.
 //
-// Kept SEPARATE from chain_reference() on purpose. If the oracle and the code
-// it validates shared this primitive, a bug in sha256_64 would move both and
-// verify_backend() could accept a broken back end. The oracle stays on the most
-// exercised primitive in the tree; the self-test pins sha256_64 to it directly.
+// Kept separate from the oracle on purpose: sharing this primitive would let a
+// bug in sha256_64 move both and verify a broken back end.
 std::string chain_fallback(const std::string& seed, int iterations) {
   if (iterations <= 0) return seed;
 
@@ -53,7 +45,7 @@ std::string chain_fallback(const std::string& seed, int iterations) {
   sha256(reinterpret_cast<const std::uint8_t*>(seed.data()), seed.size(), digest);
   hex_encode(digest, kSha256DigestBytes, hex);
 
-  for (int i = 1; i < iterations; ++i) {
+  for (int i{1}; i < iterations; ++i) {
     sha256_64(reinterpret_cast<const std::uint8_t*>(hex), digest);
     hex_encode(digest, kSha256DigestBytes, hex);
   }
@@ -68,24 +60,14 @@ void first_round(const std::string& seed, char out[kSha256HexBytes]) {
   hex_encode(digest, kSha256DigestBytes, out);
 }
 
-// A back end is only trusted if it reproduces the reference digest, here, at
-// startup. A wrong digest is worth zero and fails silently -- it still looks
-// like 64 plausible hex characters -- so the cost of being wrong is the whole
-// score. Verification costs microseconds; it is not optional.
-//
-// Verification is per entry point, not all-or-nothing. chain1/chain2 are the
-// core: they were the paths verified on real silicon, and without them the
-// back end has nothing to offer, so a core failure rejects the whole thing and
-// we serve from the fast scalar fallback instead. chain3/chain4 reuse the same
-// verified instruction sequences and differ only in scheduling order, but if
-// either ever disagreed with the oracle -- on any future hardware, after any
-// future edit -- nulling that single pointer degrades the pool to fewer lanes
-// while keeping the accelerated core. A whole-back-end rejection here would
-// cost ~7x throughput over a one-lane drop.
+// A wrong digest is worth zero and still looks like 64 plausible hex chars, so
+// nothing serves until it reproduces the oracle. Verification is per entry
+// point: a core failure rejects the back end, while a wider lane that fails is
+// nulled individually and the pool degrades rather than losing ~7x throughput.
 bool verify_core(const chain::Backend& b) {
-  // Seeds chosen to cover what the endpoint can actually receive: a normal k6
-  // seed, the empty-seed sentinel, an odd length, and the empty string.
-  const char* seeds[] = {"0.5", "none", "0.4821", "", "0.123456789012345"};
+  // Seeds cover what the endpoint can actually receive: a k6 seed, the
+  // empty-seed sentinel, an odd length, and the empty string.
+  const char* seeds[]{"0.5", "none", "0.4821", "", "0.123456789012345"};
 
   for (const char* s : seeds) {
     char h0[kSha256HexBytes];
@@ -101,8 +83,8 @@ bool verify_core(const chain::Backend& b) {
     }
   }
 
-  // chain2 must agree with chain1 -- an interleaving bug that crosses the two
-  // lanes would otherwise be invisible until it shipped.
+  // chain2 must agree with chain1, or a cross-lane interleaving bug stays
+  // invisible until it ships.
   char ha[kSha256HexBytes], hb[kSha256HexBytes];
   char oa[kSha256HexBytes], ob[kSha256HexBytes];
   first_round("0.5", ha);
@@ -119,8 +101,8 @@ bool verify_core(const chain::Backend& b) {
   return true;
 }
 
-// The third lane is the one most likely to be dropped or aliased by a
-// copy-paste slip, so it gets distinct seeds of its own.
+// The third lane is the one a copy-paste slip most easily drops or aliases, so
+// it gets a distinct seed of its own.
 bool verify_lane3(const chain::Backend& b) {
   char ha[kSha256HexBytes], hb[kSha256HexBytes], hc[kSha256HexBytes];
   char oa[kSha256HexBytes], ob[kSha256HexBytes], oc[kSha256HexBytes];
@@ -170,23 +152,20 @@ bool verify_lane4(const chain::Backend& b) {
   return true;
 }
 
-// The eight-lane path is a different KIND of kernel from chain1..chain4, not a
-// wider copy of one: it phase-splits the message schedule into an L1 buffer and
-// pipelines two lane groups against each other, so a bug here would not look
-// like any bug the narrower lanes can have. It gets eight distinct seeds, and
-// it gets the odd round counts -- 1, 2, 3 -- because the pipeline primes one
-// group's schedule before the loop and a fencepost there would only show up on
-// the shortest chains.
+// chain8 is a different kind of kernel, not a wider copy, so its bugs do not
+// look like the narrow lanes' bugs. Round counts 1-3 matter: the pipeline
+// primes one group's schedule before the loop, and a fencepost there would
+// only surface on the shortest chains.
 bool verify_lane8(const chain::Backend& b) {
-  const char* seeds[8] = {"0.5",      "0.9999",   "0.31415", "0.271828",
-                          "1.61803",  "2.71828",  "",        "0.000001"};
+  const char* seeds[8]{"0.5",     "0.9999",  "0.31415", "0.271828",
+                       "1.61803", "2.71828", "",        "0.000001"};
   char h[8][kSha256HexBytes];
   char o[8][kSha256HexBytes];
-  for (int i = 0; i < 8; ++i) first_round(seeds[i], h[i]);
+  for (int i{}; i < 8; ++i) first_round(seeds[i], h[i]);
 
   for (const int iterations : {1, 2, 3, 4, 12, 33}) {
     b.chain8(h, iterations - 1, o);
-    for (int i = 0; i < 8; ++i) {
+    for (int i{}; i < 8; ++i) {
       if (chain_reference(seeds[i], iterations) !=
           std::string(o[i], kSha256HexBytes)) {
         return false;
@@ -194,16 +173,13 @@ bool verify_lane8(const chain::Backend& b) {
     }
   }
 
-  // The lanes must not be aliased. Eight identical seeds must give eight
-  // identical answers, and the check above would pass even if the kernel
-  // silently copied lane 0 everywhere, so pair it with a run where all eight
-  // inputs differ only in the last character -- the cheapest way to catch a
-  // group-index slip between the A and B halves.
-  const char* twins[8] = {"0.10", "0.11", "0.12", "0.13",
-                          "0.14", "0.15", "0.16", "0.17"};
-  for (int i = 0; i < 8; ++i) first_round(twins[i], h[i]);
+  // Near-identical seeds catch a group-index slip between the A and B halves,
+  // which the distinct-seed pass above would miss if lane 0 were copied.
+  const char* twins[8]{"0.10", "0.11", "0.12", "0.13",
+                       "0.14", "0.15", "0.16", "0.17"};
+  for (int i{}; i < 8; ++i) first_round(twins[i], h[i]);
   b.chain8(h, 16, o);
-  for (int i = 0; i < 8; ++i) {
+  for (int i{}; i < 8; ++i) {
     if (chain_reference(twins[i], 17) != std::string(o[i], kSha256HexBytes)) {
       return false;
     }
@@ -212,22 +188,17 @@ bool verify_lane8(const chain::Backend& b) {
 }
 
 chain::Backend g_storage;
-const chain::Backend* g_backend = nullptr;
-bool g_rejected = false;
-bool g_partial = false;
-const char* g_forced = nullptr;
+const chain::Backend* g_backend{nullptr};
+bool g_rejected{false};
+bool g_partial{false};
+const char* g_forced{nullptr};
 std::once_flag g_select_once;
 
 void select_backend() {
-  // RISK_BACKEND forces a specific path, so accelerated and reference builds
-  // can be A/B'd on the same box, same binary, same run -- the only honest way
-  // to quote a speedup. "reference" serves from the scalar fallback; "arm" and
-  // "x86-sha-ni" each try exactly one accelerated back end, which is what the
-  // Dockerfile's forced self-test passes use to exercise a specific one on its
-  // real target hardware. Unset selects automatically: ARM crypto first, then
-  // x86 SHA-NI.
-  const char* forced = std::getenv("RISK_BACKEND");
-  const chain::Backend* candidate = nullptr;
+  // RISK_BACKEND forces one path so accelerated and reference can be A/B'd on
+  // the same binary and run. Unset selects ARM crypto first, then x86 SHA-NI.
+  const char* forced{std::getenv("RISK_BACKEND")};
+  const chain::Backend* candidate{nullptr};
   if (forced != nullptr && std::strcmp(forced, "reference") == 0) {
     g_forced = forced;
     return;
@@ -271,13 +242,10 @@ void init_risk_backend() { std::call_once(g_select_once, select_backend); }
 int risk_lane_width() {
   init_risk_backend();
   if (g_backend == nullptr) return 1;
-  int width = g_backend->lanes;
-  // A lane that failed verification was nulled out above, and the risk_hash_xN
-  // wrappers quietly compose around the hole. Narrow the batch instead, so the
-  // pool stops assembling groups the back end can no longer run as one.
-  //
-  // Eight degrades to four rather than to seven: chain8 is the only eight-wide
-  // path, so without it the widest genuine group is whatever chain4 gives.
+  int width{g_backend->lanes};
+  // A nulled lane still composes correctly through the wrappers, but the pool
+  // must stop assembling groups the back end can no longer run as one. Eight
+  // degrades to four: chain8 is the only eight-wide path.
   if (width >= 8 && g_backend->chain8 == nullptr) width = 4;
   if (width >= 4 && g_backend->chain4 == nullptr) width = 3;
   if (width >= 3 && g_backend->chain3 == nullptr) width = 2;
@@ -305,9 +273,6 @@ bool risk_backend_partial() {
   return g_partial;
 }
 
-// The RISK_BACKEND value this process was started with, or nullptr. The
-// self-test uses it to distinguish "forced back end absent on this CPU, skip"
-// from a real verification failure.
 const char* risk_backend_forced() {
   init_risk_backend();
   return g_forced;
@@ -350,7 +315,6 @@ void risk_hash_x3(const std::string& seed_a, const std::string& seed_b,
   init_risk_backend();
   if (iterations <= 0 || g_backend == nullptr ||
       g_backend->chain3 == nullptr) {
-    // Correct either way, just without the interleaving win.
     out_a = risk_hash(seed_a, iterations);
     out_b = risk_hash(seed_b, iterations);
     out_c = risk_hash(seed_c, iterations);
@@ -402,8 +366,7 @@ void risk_hash_x8(const std::string seeds[8], std::string out[8],
   init_risk_backend();
   if (iterations <= 0 || g_backend == nullptr ||
       g_backend->chain8 == nullptr) {
-    // Correct either way. Two four-lane groups rather than eight singles, so a
-    // back end without chain8 still gets whatever width it does have.
+    // Two four-lane groups, so a back end without chain8 still gets its width.
     risk_hash_x4(seeds[0], seeds[1], seeds[2], seeds[3], out[0], out[1], out[2],
                  out[3], iterations);
     risk_hash_x4(seeds[4], seeds[5], seeds[6], seeds[7], out[4], out[5], out[6],
@@ -413,9 +376,9 @@ void risk_hash_x8(const std::string seeds[8], std::string out[8],
 
   char s[8][kSha256HexBytes];
   char r[8][kSha256HexBytes];
-  for (int i = 0; i < 8; ++i) first_round(seeds[i], s[i]);
+  for (int i{}; i < 8; ++i) first_round(seeds[i], s[i]);
   g_backend->chain8(s, iterations - 1, r);
-  for (int i = 0; i < 8; ++i) out[i].assign(r[i], kSha256HexBytes);
+  for (int i{}; i < 8; ++i) out[i].assign(r[i], kSha256HexBytes);
 }
 
 }  // namespace obsidio

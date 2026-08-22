@@ -1,15 +1,11 @@
-// Socket-level tests for the HTTP front end.
+// Socket-level tests for the HTTP front end: raw bytes to a real server
+// process, because what is under test is what a well-behaved client cannot
+// express -- a 20-digit Content-Length, two conflicting ones, a header name
+// with a space, a body that never arrives.
 //
-// These speak raw bytes to a real obsidio-server process, because the things
-// under test are precisely the ones a well-behaved HTTP client cannot express:
-// a 20-digit Content-Length, two conflicting Content-Length headers, a header
-// name with a space in it, a body that never arrives. curl will not send those;
-// an attacker will.
-//
-// Every case asserts a specific status code. The rule the whole file is built
-// around: a malformed request must be answered and closed, never crash the
-// process and never be silently mis-framed into the next request on the same
-// connection.
+// The rule the whole file is built around: a malformed request is answered and
+// closed, never crashing the process and never mis-framed into the next
+// request on the same connection.
 //
 // Usage: obsidio-http-test <path-to-obsidio-server>
 #include <arpa/inet.h>
@@ -21,20 +17,20 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <string>
 
 namespace {
 
-constexpr std::uint16_t kPort = 18099;
-int g_failures = 0;
-int g_checks = 0;
+constexpr std::uint16_t kPort{18099};
+int g_failures{};
+int g_checks{};
 
 int connect_server() {
-  const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+  const int fd{::socket(AF_INET, SOCK_STREAM, 0)};
   if (fd < 0) return -1;
   sockaddr_in addr{};
   addr.sin_family = AF_INET;
@@ -54,28 +50,28 @@ int connect_server() {
 
 // Send raw bytes, read whatever comes back until EOF or the read timeout.
 std::string exchange(const std::string& request) {
-  const int fd = connect_server();
+  const int fd{connect_server()};
   if (fd < 0) return "<connect-failed>";
-  std::size_t sent = 0;
+  std::size_t sent{};
   while (sent < request.size()) {
-    const ssize_t n = ::send(fd, request.data() + sent, request.size() - sent,
-                             MSG_NOSIGNAL);
+    const ssize_t n{::send(fd, request.data() + sent, request.size() - sent,
+                           MSG_NOSIGNAL)};
     if (n <= 0) break;
     sent += static_cast<std::size_t>(n);
   }
   std::string out;
   char buf[4096];
   for (;;) {
-    const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+    const ssize_t n{::recv(fd, buf, sizeof(buf), 0)};
     if (n <= 0) break;
     out.append(buf, static_cast<std::size_t>(n));
     // A complete response whose body we already hold: stop rather than wait
     // out the timeout on a kept-alive connection.
-    const std::size_t head_end = out.find("\r\n\r\n");
+    const std::size_t head_end{out.find("\r\n\r\n")};
     if (head_end != std::string::npos) {
-      const std::size_t cl = out.find("Content-Length: ");
+      const std::size_t cl{out.find("Content-Length: ")};
       if (cl != std::string::npos && cl < head_end) {
-        const std::size_t len = std::strtoul(out.c_str() + cl + 16, nullptr, 10);
+        const std::size_t len{std::strtoul(out.c_str() + cl + 16, nullptr, 10)};
         if (out.size() >= head_end + 4 + len) break;
       }
     }
@@ -92,8 +88,8 @@ int status_of(const std::string& response) {
 
 void check_status(const char* label, const std::string& request, int want) {
   ++g_checks;
-  const std::string response = exchange(request);
-  const int got = status_of(response);
+  const std::string response{exchange(request)};
+  const int got{status_of(response)};
   if (got == want) {
     std::printf("  ok    %s -> %d\n", label, got);
     return;
@@ -102,7 +98,7 @@ void check_status(const char* label, const std::string& request, int want) {
   if (response.empty()) {
     std::printf("        (no response; connection closed silently)\n");
   } else {
-    const std::size_t line_end = response.find("\r\n");
+    const std::size_t line_end{response.find("\r\n")};
     std::printf("        first line: %.*s\n",
                 static_cast<int>(line_end == std::string::npos ? response.size()
                                                               : line_end),
@@ -135,11 +131,11 @@ std::string post_price(const std::string& body) {
 }
 
 bool wait_ready() {
-  for (int i = 0; i < 100; ++i) {
-    const int fd = connect_server();
+  for (int i{}; i < 100; ++i) {
+    const int fd{connect_server()};
     if (fd >= 0) {
       ::close(fd);
-      const std::string r = exchange(get("/health"));
+      const std::string r{exchange(get("/health"))};
       if (status_of(r) == 200) return true;
     }
     usleep(100 * 1000);
@@ -155,7 +151,7 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  const pid_t pid = ::fork();
+  const pid_t pid{::fork()};
   if (pid < 0) {
     std::perror("fork");
     return 2;
@@ -309,12 +305,12 @@ int main(int argc, char** argv) {
   {
     // The NaN attempts above must not have reached the price table: if one had,
     // this response would contain bare `nan`, which is not valid JSON.
-    const std::string r = exchange(get("/price?symbol=AAPL"));
+    const std::string r{exchange(get("/price?symbol=AAPL"))};
     check_true("GET /price returns no nan/inf after rejected writes",
                r.find("nan") == std::string::npos &&
                    r.find("inf") == std::string::npos &&
                    status_of(r) == 200);
-    const std::string s = exchange(get("/stats?symbol=AAPL"));
+    const std::string s{exchange(get("/stats?symbol=AAPL"))};
     check_true("GET /stats returns no nan/inf after rejected writes",
                s.find("nan") == std::string::npos &&
                    s.find("inf") == std::string::npos &&
@@ -343,19 +339,19 @@ int main(int argc, char** argv) {
     // ~211 bytes per response -- N=8 fits comfortably, the rest do not.
     for (const int depth : {8, 24, 32, 40, 48, 64, 96}) {
       std::string batch;
-      for (int i = 0; i < depth - 1; ++i) {
+      for (int i{}; i < depth - 1; ++i) {
         batch += "GET /stats?symbol=AAPL HTTP/1.1\r\nHost: t\r\n\r\n";
       }
       batch +=
           "GET /stats?symbol=AAPL HTTP/1.1\r\nHost: t\r\nConnection: "
           "close\r\n\r\n";
 
-      const int fd = connect_server();
+      const int fd{connect_server()};
       if (fd < 0) {
         check_true("connect for backpressure test", false);
         continue;
       }
-      std::size_t sent = 0;
+      std::size_t sent{};
       while (sent < batch.size()) {
         const ssize_t n =
             ::send(fd, batch.data() + sent, batch.size() - sent, MSG_NOSIGNAL);
@@ -369,7 +365,7 @@ int main(int argc, char** argv) {
       std::string acc;
       char buf[8192];
       for (;;) {
-        const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        const ssize_t n{::recv(fd, buf, sizeof(buf), 0)};
         if (n <= 0) break;
         acc.append(buf, static_cast<std::size_t>(n));
       }
@@ -377,17 +373,17 @@ int main(int argc, char** argv) {
 
       // Walk the stream response by response; a short final body or a
       // dangling partial header both count as corruption.
-      int complete = 0;
-      bool corrupt = false;
-      std::size_t pos = 0;
+      int complete{};
+      bool corrupt{false};
+      std::size_t pos{};
       for (;;) {
-        const std::size_t he = acc.find("\r\n\r\n", pos);
+        const std::size_t he{acc.find("\r\n\r\n", pos)};
         if (he == std::string::npos) {
           corrupt = pos < acc.size();  // trailing bytes that are not a response
           break;
         }
-        std::size_t declared = 0;
-        const std::size_t cl = acc.find("Content-Length: ", pos);
+        std::size_t declared{};
+        const std::size_t cl{acc.find("Content-Length: ", pos)};
         if (cl != std::string::npos && cl < he) {
           declared = std::strtoul(acc.c_str() + cl + 16, nullptr, 10);
         }
@@ -413,27 +409,27 @@ int main(int argc, char** argv) {
 
   std::printf("\nFraming survives: keep-alive and pipelining still work\n");
   {
-    const int fd = connect_server();
+    const int fd{connect_server()};
     check_true("connect for keep-alive test", fd >= 0);
     if (fd >= 0) {
       // Two requests in one write: the second is only answered if the first
       // consumed exactly its own bytes and no more.
-      const std::string two = get("/health") + get("/price?symbol=AAPL");
+      const std::string two{get("/health") + get("/price?symbol=AAPL")};
       ::send(fd, two.data(), two.size(), MSG_NOSIGNAL);
       std::string acc;
       char buf[4096];
-      for (int i = 0; i < 8; ++i) {
-        const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+      for (int i{}; i < 8; ++i) {
+        const ssize_t n{::recv(fd, buf, sizeof(buf), 0)};
         if (n <= 0) break;
         acc.append(buf, static_cast<std::size_t>(n));
-        std::size_t count = 0;
+        std::size_t count{};
         for (std::size_t p = acc.find("HTTP/1.1 "); p != std::string::npos;
              p = acc.find("HTTP/1.1 ", p + 1)) {
           ++count;
         }
         if (count >= 2) break;
       }
-      std::size_t responses = 0;
+      std::size_t responses{};
       for (std::size_t p = acc.find("HTTP/1.1 "); p != std::string::npos;
            p = acc.find("HTTP/1.1 ", p + 1)) {
         ++responses;
@@ -447,13 +443,13 @@ int main(int argc, char** argv) {
   std::printf("\nThe server is still alive after every one of those\n");
   check_status("GET /health after the whole suite", get("/health"), 200);
   {
-    int status = 0;
-    const pid_t r = ::waitpid(pid, &status, WNOHANG);
+    int status{};
+    const pid_t r{::waitpid(pid, &status, WNOHANG)};
     check_true("server process did not crash or exit", r == 0);
   }
 
   ::kill(pid, SIGTERM);
-  int wstatus = 0;
+  int wstatus{};
   ::waitpid(pid, &wstatus, 0);
 
   std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);

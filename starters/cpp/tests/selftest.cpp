@@ -17,7 +17,7 @@
 
 namespace {
 
-int g_failures = 0;
+int g_failures{};
 
 void expect_eq(const std::string& label, const std::string& got,
                const std::string& want) {
@@ -84,13 +84,13 @@ int main() {
   {
     // A byte sweep across the block, and a real chain value.
     std::string mixed(64, '\0');
-    for (int i = 0; i < 64; ++i) mixed[i] = static_cast<char>(i * 4 + 1);
+    for (int i{}; i < 64; ++i) mixed[i] = static_cast<char>(i * 4 + 1);
     expect_eq("byte sweep", sha256_64_hex(mixed), sha256_hex(mixed));
-    const std::string chained = sha256_hex("0.5");
+    const std::string chained{sha256_hex("0.5")};
     expect_eq("live chain value", sha256_64_hex(chained), sha256_hex(chained));
     // Every hex character, since that is all the chain ever feeds it.
     std::string hexish(64, '0');
-    for (int i = 0; i < 64; ++i) hexish[i] = "0123456789abcdef"[i % 16];
+    for (int i{}; i < 64; ++i) hexish[i] = "0123456789abcdef"[i % 16];
     expect_eq("hex alphabet", sha256_64_hex(hexish), sha256_hex(hexish));
   }
 
@@ -149,8 +149,8 @@ int main() {
 
   std::printf("\nRisk chain, x3 interleaved (what the pool runs at peak)\n");
   {
-    const std::string kSeed05 = obsidio::risk_hash("0.5");
-    const std::string kSeedNone = obsidio::risk_hash("none");
+    const std::string kSeed05{obsidio::risk_hash("0.5")};
+    const std::string kSeedNone{obsidio::risk_hash("none")};
     std::string a, b, c;
 
     obsidio::risk_hash_x3("0.5", "none", "0.4821", a, b, c);
@@ -189,10 +189,10 @@ int main() {
 
   std::printf("\nRisk chain, x4 interleaved (what the pool runs at peak)\n");
   {
-    const std::string kSeed05 = obsidio::risk_hash("0.5");
-    const std::string kSeedNone = obsidio::risk_hash("none");
-    const std::string kSeed4821 = obsidio::risk_hash("0.4821");
-    const std::string kSeedPi = obsidio::risk_hash("0.31415");
+    const std::string kSeed05{obsidio::risk_hash("0.5")};
+    const std::string kSeedNone{obsidio::risk_hash("none")};
+    const std::string kSeed4821{obsidio::risk_hash("0.4821")};
+    const std::string kSeedPi{obsidio::risk_hash("0.31415")};
     std::string a, b, c, d;
 
     obsidio::risk_hash_x4("0.5", "none", "0.4821", "0.31415", a, b, c, d);
@@ -237,25 +237,25 @@ int main() {
     // two groups of four. Two failure modes are unique to that -- a lane index
     // slipping between the A and B halves, and a fencepost in the group whose
     // schedule is primed before the loop -- so both get their own check.
-    const char* seeds[8] = {"0.5",     "none",    "0.4821",  "0.31415",
+    const char* seeds[8]{"0.5",     "none",    "0.4821",  "0.31415",
                             "1.61803", "2.71828", "",        "0.000001"};
     std::string s[8], got[8], want[8];
-    for (int i = 0; i < 8; ++i) {
+    for (int i{}; i < 8; ++i) {
       s[i] = seeds[i];
       want[i] = obsidio::risk_hash(seeds[i]);
     }
 
     obsidio::risk_hash_x8(s, got);
-    for (int i = 0; i < 8; ++i) {
+    for (int i{}; i < 8; ++i) {
       expect_eq(std::string("x8 lane ") + static_cast<char>('A' + i), got[i],
                 want[i]);
     }
 
     // Reversed, so a lane that quietly reads its neighbour's slot moves.
     std::string rev[8], rgot[8];
-    for (int i = 0; i < 8; ++i) rev[i] = s[7 - i];
+    for (int i{}; i < 8; ++i) rev[i] = s[7 - i];
     obsidio::risk_hash_x8(rev, rgot);
-    for (int i = 0; i < 8; ++i) {
+    for (int i{}; i < 8; ++i) {
       expect_eq(std::string("x8 reversed lane ") + static_cast<char>('A' + i),
                 rgot[i], want[7 - i]);
     }
@@ -264,9 +264,9 @@ int main() {
     // the wrong input, which the checks above would not distinguish from a
     // correct one if the kernel simply broadcast lane 0.
     std::string same[8], sgot[8];
-    for (int i = 0; i < 8; ++i) same[i] = "0.5";
+    for (int i{}; i < 8; ++i) same[i] = "0.5";
     obsidio::risk_hash_x8(same, sgot);
-    for (int i = 0; i < 8; ++i) {
+    for (int i{}; i < 8; ++i) {
       expect_eq(std::string("x8 same seed lane ") + static_cast<char>('A' + i),
                 sgot[i], want[0]);
     }
@@ -282,7 +282,7 @@ int main() {
     for (const int n : {1, 2, 3, 10}) {
       std::string ngot[8];
       obsidio::risk_hash_x8(s, ngot, n);
-      for (int i = 0; i < 8; ++i) {
+      for (int i{}; i < 8; ++i) {
         expect_eq(std::string("x8 n=") + std::to_string(n) + " lane " +
                       static_cast<char>('A' + i),
                   ngot[i], obsidio::risk_hash(seeds[i], n));
@@ -291,25 +291,15 @@ int main() {
   }
 
   // -------------------------------------------------------------------------
-  // Back end status. Semantics depend on how this run was invoked:
-  //
-  //   RISK_BACKEND unset / "reference"  (the default and oracle passes)
-  //     A rejected accelerated back end is not a correctness failure -- the
-  //     fallback serves correct digests and every check above still passes --
-  //     but it silently costs ~7x throughput, which is the whole competition.
-  //     On an architecture that HAS an accelerated back end, a core rejection
-  //     means the back end is buggy: fail the build rather than ship quietly
-  //     slow. A partial lane rejection only costs some lanes, so it warns.
-  //
-  //   RISK_BACKEND=arm / x86-sha-ni     (forced passes from the Dockerfile)
-  //     These exist to exercise one specific accelerated back end on real
-  //     hardware. If the CPU simply does not have it, SKIP (exit 0) -- the
-  //     same image must build on either architecture. If the CPU has it and
-  //     it fails verification, that is exactly the bug these passes exist to
-  //     catch: FAIL.
+  // Back end status, read differently depending on how this run was invoked.
+  // Unforced: a rejection still serves correct digests, but costs ~7x, so on
+  // an architecture that has a back end it fails the build rather than ship
+  // quietly slow. Forced (the Dockerfile's passes): a CPU without the back end
+  // SKIPs, since one image must build on either architecture, but a CPU that
+  // has it and fails verification is the bug these passes exist to catch.
   std::printf("\nHash back end\n");
   std::printf("  selected: %s\n", obsidio::risk_backend_name());
-  const char* forced = obsidio::risk_backend_forced();
+  const char* forced{obsidio::risk_backend_forced()};
   const bool accelerated_forced =
       forced != nullptr &&
       (std::strcmp(forced, "arm") == 0 || std::strcmp(forced, "x86-sha-ni") == 0);

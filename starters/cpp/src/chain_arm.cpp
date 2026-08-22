@@ -1,11 +1,9 @@
 // ARMv8 crypto-extension back end for the /risk chain.
 //
-// This translation unit is the ONLY one compiled with `+crypto` (see
-// CMakeLists.txt), and nothing in it is called until arm_crypto_backend() has
-// confirmed HWCAP_SHA2 at runtime. That keeps the binary safe to start on an
-// ARM core without the extension, and safe to build for any architecture.
-//
-// On a non-aarch64 build the whole file collapses to `return nullptr`.
+// The only translation unit compiled with `+crypto`, and nothing here runs
+// until arm_crypto_backend() confirms HWCAP_SHA2 at runtime, so the binary
+// stays safe to start on a core without the extension. On a non-aarch64 build
+// the whole file collapses to `return nullptr`.
 #include "chain_backend.hpp"
 
 #if defined(__aarch64__)
@@ -24,7 +22,7 @@ namespace obsidio {
 namespace chain {
 namespace {
 
-alignas(16) const std::uint32_t KC[64] = {
+alignas(16) const std::uint32_t KC[64]{
     0x428a2f98u, 0x71374491u, 0xb5c0fbcfu, 0xe9b5dba5u, 0x3956c25bu, 0x59f111f1u,
     0x923f82a4u, 0xab1c5ed5u, 0xd807aa98u, 0x12835b01u, 0x243185beu, 0x550c7dc3u,
     0x72be5d74u, 0x80deb1feu, 0x9bdc06a7u, 0xc19bf174u, 0xe49b69c1u, 0xefbe4786u,
@@ -38,14 +36,10 @@ alignas(16) const std::uint32_t KC[64] = {
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
 };
 
-// Every message in the steady state is exactly 64 bytes, so block 2 is always
-// 0x80, zeros, and the bit length 512 -- a compile-time constant. Its whole
-// message schedule, and therefore K[i] + W[i], is constant too, so block 2
-// needs no sha256su0/su1 at all.
-//
-// Worth ~2% in isolation, not the 20% you would guess: block 2 is bound by the
-// sha256h -> sha256h2 dependency chain, so the scheduling work this removes was
-// filling issue slots that were idle anyway. It is free, so it stays.
+// Block 2 of a 64-byte message is always the same constant, so K[i] + W[i] is
+// too and block 2 needs no sha256su0/su1. Worth ~2%, not the 20% you would
+// guess: it is bound by the sha256h -> sha256h2 chain, so the scheduling work
+// removed was filling idle issue slots. Free, so it stays.
 alignas(16) std::uint32_t KW2[64];
 
 constexpr std::uint32_t rotr(std::uint32_t x, int n) {
@@ -54,71 +48,70 @@ constexpr std::uint32_t rotr(std::uint32_t x, int n) {
 
 struct Kw2Init {
   Kw2Init() {
-    std::uint32_t w[64] = {};
+    std::uint32_t w[64]{};
     w[0] = 0x80000000u;
     w[15] = 512u;  // 64 message bytes * 8
-    for (int i = 16; i < 64; ++i) {
-      const std::uint32_t s0 =
-          rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-      const std::uint32_t s1 =
-          rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+    for (int i{16}; i < 64; ++i) {
+      const std::uint32_t s0{
+          rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3)};
+      const std::uint32_t s1{
+          rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10)};
       w[i] = w[i - 16] + s0 + w[i - 7] + s1;
     }
-    for (int i = 0; i < 64; ++i) KW2[i] = KC[i] + w[i];
+    for (int i{}; i < 64; ++i) KW2[i] = KC[i] + w[i];
   }
 };
 const Kw2Init g_kw2_init;
 
 // One chain's live state. The whole 50,000-iteration loop keeps these six
-// vectors in registers and never touches memory -- that, not the intrinsics
-// themselves, is where the bulk of the speedup over a per-iteration library
-// call comes from.
+// vectors in registers and never touches memory, which is where the bulk of
+// the speedup over a per-iteration library call comes from.
 struct Lane {
   uint32x4_t s0, s1;          // abcd, efgh
   uint32x4_t m0, m1, m2, m3;  // W0..W15 of block 1
 };
 
-const uint32x4_t kInitAbcd = {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au};
-const uint32x4_t kInitEfgh = {0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+const uint32x4_t kInitAbcd{0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au};
+const uint32x4_t kInitEfgh{0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
 
-#define ROUND4_MSG(L, Ma, Mb, Mc, Md, KIDX)                        \
-  do {                                                             \
-    const uint32x4_t wk = vaddq_u32((L).Ma, vld1q_u32(&KC[KIDX])); \
-    (L).Ma = vsha256su0q_u32((L).Ma, (L).Mb);                      \
-    const uint32x4_t save = (L).s0;                                \
-    (L).s0 = vsha256hq_u32((L).s0, (L).s1, wk);                    \
-    (L).s1 = vsha256h2q_u32((L).s1, save, wk);                     \
-    (L).Ma = vsha256su1q_u32((L).Ma, (L).Mc, (L).Md);              \
+#define ROUND4_MSG(L, Ma, Mb, Mc, Md, KIDX)                       \
+  do {                                                            \
+    const uint32x4_t wk{vaddq_u32((L).Ma, vld1q_u32(&KC[KIDX]))}; \
+    (L).Ma = vsha256su0q_u32((L).Ma, (L).Mb);                     \
+    const uint32x4_t save{(L).s0};                                \
+    (L).s0 = vsha256hq_u32((L).s0, (L).s1, wk);                   \
+    (L).s1 = vsha256h2q_u32((L).s1, save, wk);                    \
+    (L).Ma = vsha256su1q_u32((L).Ma, (L).Mc, (L).Md);             \
   } while (0)
 
-#define ROUND4_LAST(L, Ma, KIDX)                                   \
-  do {                                                             \
-    const uint32x4_t wk = vaddq_u32((L).Ma, vld1q_u32(&KC[KIDX])); \
-    const uint32x4_t save = (L).s0;                                \
-    (L).s0 = vsha256hq_u32((L).s0, (L).s1, wk);                    \
-    (L).s1 = vsha256h2q_u32((L).s1, save, wk);                     \
+#define ROUND4_LAST(L, Ma, KIDX)                                  \
+  do {                                                            \
+    const uint32x4_t wk{vaddq_u32((L).Ma, vld1q_u32(&KC[KIDX]))}; \
+    const uint32x4_t save{(L).s0};                                \
+    (L).s0 = vsha256hq_u32((L).s0, (L).s1, wk);                   \
+    (L).s1 = vsha256h2q_u32((L).s1, save, wk);                    \
   } while (0)
 
-#define ROUND4_CONST(L, KIDX)                       \
-  do {                                              \
-    const uint32x4_t wk = vld1q_u32(&KW2[KIDX]);    \
-    const uint32x4_t save = (L).s0;                 \
-    (L).s0 = vsha256hq_u32((L).s0, (L).s1, wk);     \
-    (L).s1 = vsha256h2q_u32((L).s1, save, wk);      \
+#define ROUND4_CONST(L, KIDX)                    \
+  do {                                           \
+    const uint32x4_t wk{vld1q_u32(&KW2[KIDX])};  \
+    const uint32x4_t save{(L).s0};               \
+    (L).s0 = vsha256hq_u32((L).s0, (L).s1, wk);  \
+    (L).s1 = vsha256h2q_u32((L).s1, save, wk);   \
   } while (0)
 
-const uint8x16_t kHexTable = {'0', '1', '2', '3', '4', '5', '6', '7',
-                              '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
+const uint8x16_t kHexTable{'0', '1', '2', '3', '4', '5', '6', '7',
+                           '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'};
 
 // Hex-encode the digest in (s0, s1) directly into the next iteration's message
 // vectors: no store, no reload, no separate byte-swap pass.
 inline void digest_to_next_message(Lane& L) {
-  const uint8x16_t ba = vrev32q_u8(vreinterpretq_u8_u32(L.s0));
-  const uint8x16_t bb = vrev32q_u8(vreinterpretq_u8_u32(L.s1));
-  const uint8x16_t nib = vdupq_n_u8(0x0f);
+  const uint8x16_t ba{vrev32q_u8(vreinterpretq_u8_u32(L.s0))};
+  const uint8x16_t bb{vrev32q_u8(vreinterpretq_u8_u32(L.s1))};
+  const uint8x16_t nib{vdupq_n_u8(0x0f)};
 
-  const uint8x16x2_t za = vzipq_u8(vshrq_n_u8(ba, 4), vandq_u8(ba, nib));
-  const uint8x16x2_t zb = vzipq_u8(vshrq_n_u8(bb, 4), vandq_u8(bb, nib));
+  const uint8x16x2_t za{vzipq_u8(vshrq_n_u8(ba, 4), vandq_u8(ba, nib))};
+  const uint8x16x2_t zb{vzipq_u8(vshrq_n_u8(bb, 4), vandq_u8(bb, nib))};
 
   // The hex characters are the next message; message words are big-endian
   // loads of them, hence the vrev32.
@@ -134,7 +127,7 @@ inline void digest_to_next_message(Lane& L) {
 // SHA-256 of the 64 bytes currently in m0..m3: block 1 scheduled live, block 2
 // from the constant table.
 inline void hash64(Lane& L) {
-  const uint32x4_t a0 = L.s0, b0 = L.s1;
+  const uint32x4_t a0{L.s0}, b0{L.s1};
 
   ROUND4_MSG(L, m0, m1, m2, m3, 0);
   ROUND4_MSG(L, m1, m2, m3, m0, 4);
@@ -153,8 +146,8 @@ inline void hash64(Lane& L) {
   ROUND4_LAST(L, m2, 56);
   ROUND4_LAST(L, m3, 60);
 
-  const uint32x4_t a1 = vaddq_u32(L.s0, a0);
-  const uint32x4_t b1 = vaddq_u32(L.s1, b0);
+  const uint32x4_t a1{vaddq_u32(L.s0, a0)};
+  const uint32x4_t b1{vaddq_u32(L.s1, b0)};
 
   L.s0 = a1;
   L.s1 = b1;
@@ -170,7 +163,7 @@ inline void hash64(Lane& L) {
 }
 
 inline void lane_load(Lane& L, const char in[64]) {
-  const std::uint8_t* p = reinterpret_cast<const std::uint8_t*>(in);
+  const std::uint8_t* p{reinterpret_cast<const std::uint8_t*>(in)};
   L.s0 = kInitAbcd;
   L.s1 = kInitEfgh;
   L.m0 = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(p)));
@@ -180,12 +173,12 @@ inline void lane_load(Lane& L, const char in[64]) {
 }
 
 inline void lane_store_hex(const Lane& L, char out[64]) {
-  const uint8x16_t ba = vrev32q_u8(vreinterpretq_u8_u32(L.s0));
-  const uint8x16_t bb = vrev32q_u8(vreinterpretq_u8_u32(L.s1));
-  const uint8x16_t nib = vdupq_n_u8(0x0f);
-  const uint8x16x2_t za = vzipq_u8(vshrq_n_u8(ba, 4), vandq_u8(ba, nib));
-  const uint8x16x2_t zb = vzipq_u8(vshrq_n_u8(bb, 4), vandq_u8(bb, nib));
-  std::uint8_t* o = reinterpret_cast<std::uint8_t*>(out);
+  const uint8x16_t ba{vrev32q_u8(vreinterpretq_u8_u32(L.s0))};
+  const uint8x16_t bb{vrev32q_u8(vreinterpretq_u8_u32(L.s1))};
+  const uint8x16_t nib{vdupq_n_u8(0x0f)};
+  const uint8x16x2_t za{vzipq_u8(vshrq_n_u8(ba, 4), vandq_u8(ba, nib))};
+  const uint8x16x2_t zb{vzipq_u8(vshrq_n_u8(bb, 4), vandq_u8(bb, nib))};
+  std::uint8_t* o{reinterpret_cast<std::uint8_t*>(out)};
   vst1q_u8(o,      vqtbl1q_u8(kHexTable, za.val[0]));
   vst1q_u8(o + 16, vqtbl1q_u8(kHexTable, za.val[1]));
   vst1q_u8(o + 32, vqtbl1q_u8(kHexTable, zb.val[0]));
@@ -199,7 +192,7 @@ void chain1_impl(const char in[64], int rounds, char out[64]) {
   }
   Lane L;
   lane_load(L, in);
-  for (int r = 0; r < rounds; ++r) {
+  for (int r{}; r < rounds; ++r) {
     hash64(L);
     if (r + 1 < rounds) digest_to_next_message(L);
   }
@@ -218,7 +211,7 @@ void chain2_impl(const char in_a[64], const char in_b[64], int rounds,
   lane_load(B, in_b);
   // Interleaved on purpose: the two chains are independent, so the second
   // fills the pipeline bubbles the first leaves behind sha256h's latency.
-  for (int r = 0; r < rounds; ++r) {
+  for (int r{}; r < rounds; ++r) {
     hash64(A);
     hash64(B);
     if (r + 1 < rounds) {
@@ -244,7 +237,7 @@ void chain3_impl(const char in_a[64], const char in_b[64], const char in_c[64],
   lane_load(C, in_c);
   // Two lanes already hide most of sha256h's latency; the third mops up what
   // is left. Past this, register pressure costs more than the bubbles it fills.
-  for (int r = 0; r < rounds; ++r) {
+  for (int r{}; r < rounds; ++r) {
     hash64(A);
     hash64(B);
     hash64(C);
@@ -274,7 +267,7 @@ void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
   lane_load(B, in_b);
   lane_load(C, in_c);
   lane_load(D, in_d);
-  for (int r = 0; r < rounds; ++r) {
+  for (int r{}; r < rounds; ++r) {
     hash64(A);
     hash64(B);
     hash64(C);
@@ -292,14 +285,12 @@ void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
   lane_store_hex(D, out_d);
 }
 
-// chain8 is null here on purpose. The eight-wide path is a phase-split kernel
-// written for x86's 16-register file, where the schedule and the chain state
-// cannot both be resident; ARM has 32 vector registers and its four-lane
-// interleave already keeps the schedule in them. Nothing about ARM changes.
-const Backend kArmBackend = {"armv8-crypto (x4 interleaved)", /*lanes=*/4,
-                             chain1_impl,
-                             chain2_impl, chain3_impl, chain4_impl,
-                             /*chain8=*/nullptr};
+// chain8 is null on purpose: the eight-wide path exists to work around x86's
+// 16-register file, and ARM's 32 registers already hold the schedule inside
+// the four-lane interleave.
+const Backend kArmBackend{"armv8-crypto (x4 interleaved)", /*lanes=*/4,
+                          chain1_impl, chain2_impl, chain3_impl, chain4_impl,
+                          /*chain8=*/nullptr};
 
 bool cpu_has_sha2() {
 #if defined(__linux__)
@@ -325,14 +316,7 @@ const Backend* arm_crypto_backend() {
 namespace obsidio {
 namespace chain {
 
-// No accelerated back end for this architecture yet. risk.cpp falls back to the
-// portable per-iteration path, which is correct, just ~7x slower.
-//
-// An x86 SHA-NI back end belongs here: implement chain1/chain2 with
-// _mm_sha256rnds2_epu32 / _mm_sha256msg1_epu32 / _mm_sha256msg2_epu32, gate it
-// on __builtin_cpu_supports("sha"), and return it below. risk.cpp will refuse
-// to use it unless it reproduces the reference digests, so a wrong
-// implementation costs speed, never correctness.
+// Not an aarch64 build; x86 has its own back end in chain_x86.cpp.
 const Backend* arm_crypto_backend() { return nullptr; }
 
 }  // namespace chain
