@@ -54,13 +54,15 @@ Not history — these describe work that is live, and the second retracts the
 first stage of the first.
 
 - [Phase-split kernel](phase-split-kernel.md) — the design brief for the wider
-  SHA-NI kernel. **Closed**: both stages measured, neither pays.
+  SHA-NI kernel. Both stages **as specified** measured, neither pays; a
+  pipelined variant does.
 - [Wide block 2, negative result](wide-block2-negative-result.md) — Stage 1 was
   built and measures −23%, from carrying four chain states through block 1.
-- [Phase split, negative result](phase-split-negative-result.md) — Stage 2 was
-  built as a verified skeleton and measures +6.2% against a +15% floor. The
-  round phase reaches 1.78×; phase-splitting turns the message schedule from
-  free work into 46% of the group-round.
+- [Phase split, negative result — and its sequel](phase-split-negative-result.md)
+  — sequential phase-split measures +6.2% against a +15% floor and is dead;
+  §6a then records the **pipelined** variant, which co-issues the schedule
+  across lane groups and **passes at 1.413× (≈ +36%)** at eight lanes. Probe
+  only, nothing integrated.
 - [Headroom plan](../HEADROOM-PLAN-2026-08-23.md) — the phased plan of record
   derived from all three, with a numeric kill gate at every phase boundary.
 - [How to test](../HOW-TO-TEST.md) — the runbook the Ryzen numbers came from.

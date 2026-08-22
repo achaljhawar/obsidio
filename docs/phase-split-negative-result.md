@@ -1,8 +1,16 @@
 # The phase-split kernel: built as a skeleton, measured, and it does not pay
 
 **Result: +6.2% projected `work_score` against a +15% floor. Gate A failed.
-Stage 2 is closed. `src/` is untouched — nothing was shipped, and nothing
-needed to be.**
+Stage 2 as specified is closed. `src/` is untouched — nothing was shipped, and
+nothing needed to be.**
+
+> **Sequel, same day: the pipelined variant of §6 was authorised, built and
+> measured, and it PASSES at 1.413× — about +36%.** The sequential phase-split
+> below is still dead for the reason given; what revives the design is
+> co-issuing the schedule again, across lane groups, at eight chains wide. See
+> [§6a](#6a-outcome--the-probe-was-run-and-it-passes). Still nothing
+> integrated: kernel work is a separate authorisation, and the open questions
+> at the end of §6a are real.
 
 This closes "Stage 2" of `phase-split-kernel.md`, the last live item in that
 document after Stage 1 was retracted at −23%. Measured 2026-08-23 on a
@@ -215,6 +223,76 @@ the best expected value left on the table, well ahead of Phase 4's mechanical
 +3–6%. Not authorised here; recorded so the next person does not re-derive it,
 and does not re-derive it wrong.
 
+### 6a. Outcome — the probe was run, and it passes
+
+**Gate P: PASS at 1.371× worst across four clean runs, 1.413× on a cool box —
+roughly +33% to +36% `work_score`.** Nothing was integrated; `src/` is
+untouched. Kernel work remains a separate authorisation.
+
+**The design had to change, and the reason is worth more than the number.** You
+cannot hide round *r+1*'s schedule inside round *r*'s round phase for the same
+lane — the schedule's input is the hex that round phase has not produced yet.
+Within a lane the dependency is strictly serial and no scheduling gets around
+it. So the pipeline runs across lane **groups**: split N lanes in half, prime
+one half's schedule, then alternate `rounds(A) ‖ schedule(B)` with
+`rounds(B) ‖ schedule(A′)`. Two steps advance every lane one round.
+
+Cool box, worst rep of 7, shipped x2 at 0.5200 ns/rnds2 in the same process:
+
+| structure | N | ns worst | vs shipped |
+|---|---|---|---|
+| rounds ×1 ‖ schedule ×1 | 2 | 0.7654 | 0.679× |
+| rounds ×2 ‖ schedule ×2 | 4 | 0.4423 | 1.176× |
+| rounds ×3 ‖ schedule ×3 | 6 | 0.4356 | 1.194× |
+| **rounds ×4 ‖ schedule ×4** | **8** | **0.3679** | **1.413×** |
+
+Attribution is clean, because the sequential variant sits in the same binary at
+the same round-phase width: sequential 4-lane phase-split measures 0.4689 and
+the pipelined 4-lane round group measures 0.3679. **Co-issuing the schedule is
+worth 27% with everything else held fixed.**
+
+**Where it landed in the bounds table: between the gate and the model.** Not
+the −15% register cliff, not the +51% model, but a solid +33–36%.
+
+**The register file held — the open question is answered, and by construction
+rather than by luck.** Probe C's streams=2 catastrophe never reproduces here
+because the pipeline is arranged so that at most **one** schedule stream is
+live at any moment. That was the whole point of dealing the schedule out step
+by step instead of running N streams at once.
+
+**Why it fell short of +51%**, since the gap is instructive:
+
+1. The same-lane dependency forces group pipelining, so the round phase is only
+   N/2 lanes wide. The model assumed a full-width 4-lane round phase with a
+   stream beside it; that configuration does not exist.
+2. `objdump` shows that at HALF ≥ 3 only **two** lanes' schedules are actually
+   co-issued — lane 0 rides block 1, lane 1 rides block 2, and lanes 2+ fall
+   through to a plain `schedule_lane` loop, because a 16-pair block has nowhere
+   else to deal them. So 1.413× is achieved with roughly **half** the schedule
+   hidden, not the ~91% the model assumed.
+3. Reaching it needs **eight** chains in lockstep, not four.
+
+Point 2 means there may be more here, or there may be a register wall one step
+further on. Untested, and deliberately so.
+
+**Open questions before any of this becomes a kernel** — none of them
+authorised, all of them cheap to state:
+
+- **The pool would have to batch 8.** `Backend::lanes` is 2 and
+  `risk_pool.cpp` still has a hardcoded `RiskJob jobs[4]`. That is a wider
+  change than the plan's Phase 2 anticipated, and the drain-mode composition
+  rules for odd remainders get correspondingly more awkward.
+- **Per-batch latency roughly triples.** An 8-chain lockstep batch is
+  0.3679 ns × 3.2M × 8 ≈ **9.4 ms** of compute against the shipped 2-chain
+  batch's ≈ 3.3 ms. `{tier:risk}` p95 is 203 ms against a 1500 ms bar and is
+  queueing-dominated, so ~6 ms of extra service time should vanish — but "should"
+  is the word that has cost this project two designs, and Phase 3 is where it
+  gets checked.
+- **The skeleton is not a kernel.** It omits `first_round`, the string
+  handling, and the pool's job plumbing. The comparison is fair because the
+  shipped arm is measured the same way, but integration losses are real and
+  historically unkind.
+
 ## 7. What still stands
 
 - `sha256rnds2` is latency bound (L=4, T=1) and the shipped two-lane kernel
@@ -226,18 +304,24 @@ and does not re-derive it wrong.
 - `risk_pool` batching to the back end's real lane width and the epoll work
   both landed and are unaffected by any of this.
 
-## 8. What this closes
+## 8. What this closes, and what it opens
 
 The plan's ledger had Stage 2 as the single remaining item with +15% to +45% in
-it. It is now closed at +6.2% measured, on the structure that would have
-shipped, with the mechanism understood and a written cause.
+it. **Sequential** phase-split is closed at +6.2% measured, on the structure
+that would have shipped, with the mechanism understood and a written cause.
 
-What that leaves, in expected-value order: **the pipelined probe of §6** — one
-day, a −15% to +61% band, and the only thing measured so far that could still
-move the score materially — and then Phase 4, the floor plan: LTO/PGO/clang
-sweep, fast-path profiling of the 18 µs, spin-then-sleep workers, `vzeroupper`
-after round zero. +3–6% combined, no measurement risk, plus the resilience
-write-up,
+The **pipelined** structure of §6a is not closed — it clears the gate at 1.413×
+and is now the highest-value item on the board by a wide margin. What it needs
+next is not more bench work but a decision: it implies an eight-wide risk
+batch, a `Backend::lanes` and `risk_pool` widening beyond anything the plan
+scoped, and a latency coupling that has to be validated rather than assumed.
+That is a Phase 2 authorisation, and it should be taken deliberately — the last
+two designs that looked this good at bench level cost 23 points and a gate
+respectively.
+
+Behind it, Phase 4, the floor plan: LTO/PGO/clang sweep, fast-path profiling of
+the 18 µs, spin-then-sleep workers, `vzeroupper` after round zero. +3–6%
+combined, no measurement risk, plus the resilience write-up,
 which is worth more than any of them and is now considerably richer: two
 retractions with controlled diagnostics, three harness bugs caught before they
 wrote wrong conclusions into the record, and a measurement discipline that has

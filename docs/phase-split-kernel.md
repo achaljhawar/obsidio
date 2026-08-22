@@ -1,6 +1,13 @@
 # The phase-split kernel: the one lead with real score in it
 
-> **CLOSED 2026-08-23. Both stages are now measured and neither pays.**
+> **UPDATE 2026-08-23: a pipelined variant of Stage 2 measures 1.413× (≈ +36%)
+> and clears its gate.** It co-issues the schedule with the round phase again,
+> across lane groups, at eight chains wide — see §6a of
+> [`phase-split-negative-result.md`](phase-split-negative-result.md). It is a
+> probe; nothing is integrated. The banner below still stands for both stages
+> **as originally specified**.
+>
+> **CLOSED 2026-08-23. Both stages as specified are measured and neither pays.**
 > Stage 1 was built and retracted at −23% (see the banner in §
 > "Stage 1 — widen block 2 only" below). Stage 2 was then built as a verified
 > skeleton — the real structure, not a projection — and measures **1.069× on

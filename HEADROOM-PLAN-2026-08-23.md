@@ -31,7 +31,8 @@ failing a gate costs at most a day.
 | Harness fixes: `RISK_PCT` forwarding, AVX/SSE transition isolation | **Committed on `perf/ryzen-ceiling`** (`69f4f91`), unmerged |
 | Stage 1 (wide block 2) | **Dead**: −23% measured; retraction on both branches |
 | `SCHED_IDLE`/scheduler tuning, `IO_THREADS=1`, x3 batching | **Dead**, closed by measurement |
-| Stage 2 (phase-split block 1) | **Dead**: built as a verified skeleton, measures +6.2% against a +15% floor. See Phase 1 result |
+| Stage 2, sequential phase-split | **Dead**: built as a verified skeleton, measures +6.2% against a +15% floor. See Phase 1 result |
+| Stage 2, **pipelined** phase-split | **Live and passing**: 1.413× measured at 8 lanes, ≈ +36%. Probe only — not integrated, Phase 2 unauthorised |
 | Baseline | **5,818,877 cool-state**, 2026-08-23, after both landed perf commits (was 5,767,977 before them — see Phase 0 result) |
 
 ---
@@ -216,7 +217,33 @@ more probe, hard gate at 1.17×, never a kernel — but it is now the
 **highest-expected-value work left**, ahead of Phase 4's mechanical +3–6%. §6
 of the write-up has the full arithmetic and the correction history.
 
-**Phase 2 is not entered. The pipelined probe, then Phase 4.**
+**Phase 2 is not entered.**
+
+### Phase 1a — the pipelined probe was authorised and run. It passes.
+
+**Gate P (worst-rep in-run ratio vs shipped x2 ≥ 1.17×): PASS at 1.371× worst
+across four clean runs, 1.413× cool — ≈ +33% to +36% `work_score`.**
+
+The design had to change on a constraint §6 missed: round *r+1*'s schedule
+cannot hide inside round *r*'s round phase **for the same lane**, because the
+schedule's input is that round phase's own output. The pipeline therefore runs
+across lane *groups* — `rounds(A) ‖ schedule(B)`, then `rounds(B) ‖
+schedule(A′)` — which keeps at most one schedule stream live and is why the
+register file held where Probe C's naive co-issue blew through it.
+
+Cool box, worst rep of 7, against 0.5200 ns/rnds2 shipped:
+N=4 → 1.176×, N=6 → 1.194×, **N=8 → 1.413×**. Held fixed at the same
+round-phase width, co-issuing the schedule is worth **27%**.
+
+It landed between the gate and the model, not at §6's +51% — the round phase is
+only N/2 lanes wide, only about half the schedule is actually co-issued at
+HALF ≥ 3, and it takes eight chains to get there.
+
+**Phase 2 remains unauthorised.** What it would now involve is larger than this
+plan scoped: an eight-wide risk batch, `Backend::lanes` and `risk_pool` widened
+well past the `RiskJob jobs[4]` hardcap, and a per-batch latency that roughly
+triples (≈ 9.4 ms against 3.3 ms) into a p95 with 7.4× of margin. Full detail
+and the open questions are in §6a of the write-up.
 
 ---
 
