@@ -18,6 +18,7 @@
 //
 // Override any of these with env vars to experiment; see README.md.
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

@@ -7,6 +7,7 @@
 //
 // Golden values generated with Python's hashlib; cross-check any of them with:
 //   python3 -c "import hashlib;h='0.5';[h:=hashlib.sha256(h.encode()).hexdigest() for _ in range(50000)];print(h)"
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
