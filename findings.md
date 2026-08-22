@@ -16,7 +16,7 @@ Everything below was measured in this session unless attributed to a repo docume
 | **Biggest win** | The x86 hash kernel was rewritten as a register-resident two-lane interleave: **2.389×** on the risk path, measured. |
 | **Biggest surprise** | The grading architecture is **x86-64**, not the arm64 Mac `STRATEGY.md` still asserts. |
 | **Biggest trap avoided** | The AVX2 hybrid idea was **tested and killed** before anyone wrote 600 lines of it. |
-| **Biggest methodological finding** | This laptop **thermally throttles to 1.49 GHz**, halving scores over a session. Absolute numbers from it are near-worthless; only alternated A/B ratios survive. |
+| **Biggest methodological finding** | The measurement instrument was lying: scores halved mid-session because **the laptop switched to battery power**, clamping the core from 4.63 GHz to 1.64 GHz. Not noise, not heat — power policy. |
 | **Still unclaimed** | The persistence bonus scores **zero** as shipped. |
 
 ---
@@ -130,16 +130,22 @@ Alternating probe, completed requests in 40s:
 
 **2.389×** → 4.347 → **~1.82 CPU-ms per chain**, landing on the two-lane floor implied by 64 `rnds2` per iteration at ~4-cycle latency.
 
-Full graded runs (cool machine):
+Full graded runs. Four runs across two sessions on AC power — the first pair on
+the branch kernel, the second pair on main's equivalent kernel after the power
+problem in §8 was found and fixed:
 
-| | run 1 | run 2 |
-|---|---|---|
-| `work_score` | **5,811,626** | **5,752,161** |
-| requests | 2,325,120 | 2,302,078 |
-| `/risk` p95 | 205.87 ms | 203.45 ms |
-| `/price` p95 | 336.32 µs | 345.44 µs |
-| `/stats` p95 | 338.58 µs | 348.29 µs |
-| errors | 0.00% | 0.00% |
+| | branch, run 1 | branch, run 2 | main, run 1 | main, run 2 |
+|---|---|---|---|---|
+| `work_score` | 5,811,626 | 5,752,161 | **5,732,779** | **5,686,952** |
+| requests | 2,325,120 | 2,302,078 | 2,292,691 | 2,273,170 |
+| `/risk` p95 | 205.87 ms | 203.45 ms | 206.07 ms | 207.44 ms |
+| `/price` p95 | 336.32 µs | 345.44 µs | 325.44 µs | 329.94 µs |
+| `/stats` p95 | 338.58 µs | 348.29 µs | 328.20 µs | 332.67 µs |
+| errors | 0.00% | 0.00% | 0.00% | 0.00% |
+
+**Headline: `work_score` ≈ 5,710,000**, all four thresholds green, 0.00% errors
+across 4.57M requests in the confirmed pair, reproducible to **0.81%**. All four
+runs agree within 2.2% despite being taken hours apart on two different builds.
 
 ### 5.5 Correctness
 
@@ -210,26 +216,59 @@ That is the **AVX–SSE transition penalty**. `sha256rnds2` has no VEX encoding,
 
 ---
 
-## 8. Thermal throttling — the finding that reframes everything
+## 8. The measurement instrument was lying — and it was power policy
 
-The same image, same command, same machine:
+Mid-session, scores halved. Same image, same command, same machine:
 
-| | early (cool) | late (hot) | ratio |
+| | early | mid-session | ratio |
 |---|---|---|---|
 | `work_score` | 5,781,894 | 2,656,259 | 2.18× |
 | `/risk` p95 | 205 ms | 440 ms | 2.15× |
 | `/price` p95 | 336 µs | 658 µs | 1.96× |
-| **core clock** | ~4 GHz nominal | **1.49 GHz measured** | 2.68× |
+| core clock | — | **1.49 GHz** | — |
 
-Everything degraded by the same factor **including `/price`**, which never touches the hash chain. That is a clock drop, not a code regression.
+Everything degraded by the same factor **including `/price`**, which never touches the hash chain. That ruled out a code regression immediately: it was a clock drop.
 
-**Implications:**
+### The wrong diagnosis, and how it was falsified
 
-1. **No absolute number from this box is trustworthy** without recording how long it had been under load.
-2. **The ratios survive.** Every optimisation conclusion here came from tightly alternated A/B, where both arms see the same thermal state. That design choice is what makes the 2.389× defensible.
-3. 1.49 GHz is low even for a throttled laptop — **check the Windows power plan and whether the machine is on battery.** If the CPU is being capped by policy rather than heat, every measurement including the "cool" 5.8M is understated.
+The obvious explanation was thermal throttling — a laptop pinned at 2 cores of hashing for a couple of hours. It was wrong, and the experiment that killed it was simple: **stop everything, idle 15 minutes, re-measure.**
 
-A cooldown experiment (15 min idle, re-measure clock, re-run graded) was in flight at the time of writing. Hot reading with containers stopped had already recovered 1.49 → 1.65 GHz.
+```
+under load                 : 1.49 GHz
+containers stopped         : 1.65 GHz
+after 15 minutes idle      : 1.64 GHz   <- no recovery
+graded run after idle      : work_score = 2,646,833  (vs 2,656,259 hot)
+```
+
+Heat recovers in fifteen idle minutes. This did not. So it was not heat.
+
+### The actual cause
+
+```
+Power Scheme    : "Slient"  (vendor silent/quiet profile)
+BatteryStatus   : 1 = DISCHARGING          <- the laptop was unplugged
+MaxClockSpeed   : 3201 MHz
+PROCTHROTTLEMAX : 100%                     <- not that setting
+```
+
+**The laptop had come off AC power and a vendor "Silent" profile was clamping the core.** Plugging in and selecting the performance plan:
+
+| | battery / "Silent" | AC / performance | ratio |
+|---|---|---|---|
+| core clock | 1.64 GHz | **4.63 GHz** | 2.82× |
+| `sha256rnds2` throughput | 3.3855e+08 /s | **9.5111e+08 /s** | 2.81× |
+| `work_score` | 2,656,259 | **5,709,866** | 2.16× |
+
+Instruction throughput scaled **exactly** with the clock — the clean signature of a frequency cap rather than heat, contention, or anything in the code.
+
+### What this settles
+
+1. **There was never a 40% noise floor.** On stable power the full graded script reproduces to **0.81%**. It is a perfectly good instrument; it was being fed a moving CPU.
+2. **The early 5.8M and the final 5.71M are the same measurement** taken hours apart on two different builds. The 2.6M runs were the anomaly, not the 5.8M ones.
+3. **The ratios survived regardless.** Every optimisation conclusion here came from tightly alternated A/B, where both arms see the same power state. That design choice is why the 2.389× held up while three successive explanations of the absolute numbers did not.
+4. **Score rose 2.16× while the clock rose 2.82×.** The missing ~24% is the ramp phases being VU-bound rather than CPU-bound — during the first two minutes there are not enough virtual users to saturate two cores, so clock cannot be converted into score.
+
+**Operational rule: check AC power and the active power plan before recording any number from this machine.**
 
 ---
 
@@ -244,7 +283,7 @@ Validated against three runs — `requests × 2.5` predicted `work_score` to wit
 
 | Tier | Ceiling | Status |
 |---|---|---|
-| Current (cool) | ~5.8M | measured |
+| Current (AC power, performance plan) | **~5.71M** | measured, 0.81% spread |
 | SHA-NI port limit — close the last ~12% via asymmetric x3 | **~6.4M** | the realistic ceiling |
 | AVX2 hybrid | ~8.9M | **DEAD** (§7) |
 | Chain free (fast path only: 79,080 req/s at 153% CPU) | ~53M | proves HTTP is nowhere near binding |
@@ -278,13 +317,14 @@ Recorded rather than deleted, because the reasons they were wrong are themselves
 | Claim | Status | Why |
 |---|---|---|
 | "Disabling the x86 backend is worth +10.9%" | **Retracted** | Measurement noise; correct sign is **+28.5% in favour** |
-| "The 40% spread was machine warm-up" | **Retracted** | It is thermal throttling, and worse than 40% |
-| "Your score is 5.78M" | **Qualified** | True cold; the same image scores 2.66M hot |
-| "main's `/price` being 2× slower means its kernel differs" | **Retracted** | Both images degraded identically; it was thermal |
+| "The 40% spread was machine warm-up" | **Retracted** | Not warm-up |
+| "The 40% spread is thermal throttling" | **Retracted** | 15 min idle produced no recovery (§8). It was **battery power + a vendor "Silent" profile** |
+| "Your score is 5.78M" | **Confirmed** | 5,709,866 measured independently on AC power, 0.81% spread — the 2.6M runs were the anomaly |
+| "main's `/price` being 2× slower means its kernel differs" | **Retracted** | Both images degraded identically; it was the clock |
 | "The 2.6M run was contaminated by my `docker stats` sampling" | **Retracted** | A clean re-run reproduced it |
 | "Build AVX2 multi-buffer" (implied by `STRATEGY.md` roadmap) | **Refuted** | §7 — transition penalty makes it impossible |
 
-`obsidio-findings.md` in this repo's root was written before items 2, 3 and 6 were known and **contains the superseded 40%-noise-as-warm-up claim**. It needs correcting or replacing.
+`obsidio-findings.md` in this repo's root predates every row in this table. It still explains the measurement spread as machine warm-up, still treats the x86 back end's value as unmeasured, and quotes absolute scores taken while the CPU was power-clamped. **The two documents contradict each other on `main` and should be reconciled** — the useful parts of the older one (environment spec, endpoint contract, repro commands) folded into this one, and the stale file deleted.
 
 ---
 
@@ -307,8 +347,8 @@ Recorded rather than deleted, because the reasons they were wrong are themselves
 ## 13. What to do next
 
 1. **Claim the persistence bonus** (~20 min). `mkdir -p /data` + `VOLUME` in the Dockerfile, rewrite `compose/docker-compose.yml` around the C++ service with a named volume, verify with the existing `tests/persist_test.sh`. `POST /price` is not in the graded mix, so it costs ~0 CPU during the run. **This is a whole bonus category currently forfeited.**
-2. **Check the Windows power plan** before trusting any further measurement (§8).
-3. **Take the headline number on a cold machine** and say so explicitly in the write-up.
+2. **Confirm AC power and the performance plan** before recording any number (§8). This is now a checklist item, not a hypothesis.
+3. **Headline number is settled: ~5,710,000.** Quote it with the measurement conditions attached (AC power, `--cpus=2 --memory=2g`, container unpinned, k6 on separate cores).
 4. **Write the resilience write-up.** Required deliverable, doesn't exist, and the material is unusually strong — see §14.
 5. **Correct `STRATEGY.md`** and reconcile `obsidio-findings.md`.
 6. **Delete `perf/x86-fused-x2-interleave`** — redundant with main.
@@ -322,7 +362,8 @@ The track's on-theme prize rewards *resilience by design* over luck. What this s
 
 - **Derived that score ∝ throughput** from the fixed client mix, then validated `score = 2.5 × requests` to **0.02%** on hardware it wasn't derived on.
 - **Identified that load shedding is a trap** — a 1% error ceiling means you can shed 1 request in 100, so the lever is admission control, not rejection.
-- **Discovered the measurement instrument had a 40% noise floor and built a 1% one** before trusting any optimisation decision. Then discovered the *cause* was thermal, and that only alternated A/B designs are valid on this hardware.
+- **Caught the measurement rig lying and chased it to root cause.** Scores halved mid-session; the obvious answer (thermal throttling) was falsified by idling the machine for 15 minutes and seeing no recovery. The real cause was the laptop dropping to battery under a vendor "Silent" profile, clamping the core 4.63 → 1.64 GHz. Instruction throughput scaled *exactly* with the clock, which is what proved it. On stable power the graded script reproduces to **0.81%**.
+- **Designed the A/B to be immune to it in advance.** Every optimisation conclusion came from tightly alternated arms sharing the same machine state, which is why the 2.389× held while three successive explanations of the *absolute* numbers were wrong.
 - **Found a 418-line back end that had never executed anywhere**, ran it, and measured it at +28.5%.
 - **Then found it was structurally x1-with-memory-traffic and fused it: 2.389×**, `/risk` p95 496 → 205 ms, with the fast path still ~590× under its bar.
 - **Explained where it stops and why, from the register file** — 6 vectors per lane, 16 XMM, `SHA256RNDS2`'s implicit XMM0 ⇒ 15 of 16 used; a third lane wants 21. Falsifiable, and it predicts the ARM/x86 difference correctly.
