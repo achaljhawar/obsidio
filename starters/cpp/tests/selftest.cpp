@@ -230,6 +230,66 @@ int main() {
     expect_eq("x4 n=1 lane D", d, obsidio::risk_hash("0.31415", 1));
   }
 
+  std::printf("\nRisk chain, x8 pipelined (the widest group the pool assembles)\n");
+  {
+    // x8 is a different kernel shape on x86, not a wider chain4: the schedule
+    // is phase-split into an L1 buffer and the two phases are pipelined across
+    // two groups of four. Two failure modes are unique to that -- a lane index
+    // slipping between the A and B halves, and a fencepost in the group whose
+    // schedule is primed before the loop -- so both get their own check.
+    const char* seeds[8] = {"0.5",     "none",    "0.4821",  "0.31415",
+                            "1.61803", "2.71828", "",        "0.000001"};
+    std::string s[8], got[8], want[8];
+    for (int i = 0; i < 8; ++i) {
+      s[i] = seeds[i];
+      want[i] = obsidio::risk_hash(seeds[i]);
+    }
+
+    obsidio::risk_hash_x8(s, got);
+    for (int i = 0; i < 8; ++i) {
+      expect_eq(std::string("x8 lane ") + static_cast<char>('A' + i), got[i],
+                want[i]);
+    }
+
+    // Reversed, so a lane that quietly reads its neighbour's slot moves.
+    std::string rev[8], rgot[8];
+    for (int i = 0; i < 8; ++i) rev[i] = s[7 - i];
+    obsidio::risk_hash_x8(rev, rgot);
+    for (int i = 0; i < 8; ++i) {
+      expect_eq(std::string("x8 reversed lane ") + static_cast<char>('A' + i),
+                rgot[i], want[7 - i]);
+    }
+
+    // Identical seeds: catches a lane that is computing the right answer for
+    // the wrong input, which the checks above would not distinguish from a
+    // correct one if the kernel simply broadcast lane 0.
+    std::string same[8], sgot[8];
+    for (int i = 0; i < 8; ++i) same[i] = "0.5";
+    obsidio::risk_hash_x8(same, sgot);
+    for (int i = 0; i < 8; ++i) {
+      expect_eq(std::string("x8 same seed lane ") + static_cast<char>('A' + i),
+                sgot[i], want[0]);
+    }
+
+    // Batch width must not change the digest, or the answer depends on how
+    // deep the queue happened to be.
+    std::string qa, qb, qc, qd;
+    obsidio::risk_hash_x4(s[0], s[1], s[2], s[3], qa, qb, qc, qd);
+    expect_eq("x8 agrees with x4 lane A", got[0], qa);
+    expect_eq("x8 agrees with x4 lane D", got[3], qd);
+
+    // Short chains, where the primed first schedule is most of the work.
+    for (const int n : {1, 2, 3, 10}) {
+      std::string ngot[8];
+      obsidio::risk_hash_x8(s, ngot, n);
+      for (int i = 0; i < 8; ++i) {
+        expect_eq(std::string("x8 n=") + std::to_string(n) + " lane " +
+                      static_cast<char>('A' + i),
+                  ngot[i], obsidio::risk_hash(seeds[i], n));
+      }
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Back end status. Semantics depend on how this run was invoked:
   //

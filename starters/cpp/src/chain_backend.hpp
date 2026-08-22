@@ -37,6 +37,11 @@ struct Backend {
   //
   // Do not "simplify" this to a constant 2. Capping ARM at two lanes would
   // halve its instruction-level parallelism.
+  //
+  // x86 is 8 now, not because it grew six more register-resident lanes but
+  // because chain8 is a structurally different kernel -- see chain8 below. Its
+  // sub-eight compositions are still pairs, and the pool knows that: below a
+  // full group it batches exactly as it did when this said 2.
   int lanes;
 
   // Advance one chain `rounds` more times from a 64-hex-char state.
@@ -59,6 +64,20 @@ struct Backend {
   void (*chain4)(const char in_a[64], const char in_b[64], const char in_c[64],
                  const char in_d[64], int rounds, char out_a[64],
                  char out_b[64], char out_c[64], char out_d[64]);
+
+  // Eight in lockstep, or nullptr when this back end has no eight-wide path.
+  // Arrays rather than sixteen loose pointers, purely for legibility.
+  //
+  // This is a different shape of kernel from chain1..chain4, not just a wider
+  // one. Those hold the message schedule in registers alongside the chain
+  // state, which is what caps x86 at two genuine lanes. The eight-wide x86
+  // path phase-splits -- schedule into an L1 buffer, then rounds at 2
+  // registers per lane -- and pipelines the two phases across lane groups so
+  // the schedule still hides under the rounds. See chain_x86.cpp.
+  //
+  // nullptr is the normal case: ARM's four-lane interleave is already a good
+  // use of a 32-entry register file and was not re-measured in this shape.
+  void (*chain8)(const char in[8][64], int rounds, char out[8][64]);
 };
 
 // Returns nullptr when this build was not compiled for aarch64, or when the

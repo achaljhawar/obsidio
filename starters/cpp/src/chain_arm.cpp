@@ -292,9 +292,14 @@ void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
   lane_store_hex(D, out_d);
 }
 
+// chain8 is null here on purpose. The eight-wide path is a phase-split kernel
+// written for x86's 16-register file, where the schedule and the chain state
+// cannot both be resident; ARM has 32 vector registers and its four-lane
+// interleave already keeps the schedule in them. Nothing about ARM changes.
 const Backend kArmBackend = {"armv8-crypto (x4 interleaved)", /*lanes=*/4,
                              chain1_impl,
-                             chain2_impl, chain3_impl, chain4_impl};
+                             chain2_impl, chain3_impl, chain4_impl,
+                             /*chain8=*/nullptr};
 
 bool cpu_has_sha2() {
 #if defined(__linux__)

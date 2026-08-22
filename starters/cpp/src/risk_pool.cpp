@@ -12,6 +12,10 @@
 namespace obsidio {
 namespace {
 
+// The widest group any back end offers. Sizes the per-worker job array; the
+// batcher never asks for more than the selected back end's lane width.
+constexpr int kMaxBatch = 8;
+
 // Drop this thread to the weakest scheduling class available. Both calls are
 // permitted for unprivileged processes inside a container -- lowering your own
 // priority never needs CAP_SYS_NICE.
@@ -89,22 +93,45 @@ void RiskPool::worker_loop() {
   const int width = risk_lane_width();
 
   for (;;) {
-    // Take up to FOUR jobs, but only in whole lane groups. A single chain is
+    // Take a whole lane group when one is queued, otherwise the largest batch
+    // that composes without stranding a chain on its own. A single chain is
     // latency-bound, so extra independent chains interleaved in the same loop
     // ride along in the pipeline bubbles -- that is instruction-level
     // parallelism inside one thread, NOT extra threads: the worker count is
     // unchanged and the 2-CPU cap is untouched.
     //
-    // The grouping has to follow the back end's real lane width, not the widest
-    // chainN that happens to exist. On x86 the width is 2, and a three-job
-    // group there composes to chain2 + chain1: the odd chain runs alone at the
-    // 1-lane rate, making the group 39% worse than a two-job group (390.84 vs
-    // 640.46 chains/s, Ryzen 7 170). Leaving that third job queued to pair with
-    // the next arrival is strictly better, and under the graded load the queue
-    // sits deep at peak so a partner is essentially always about to arrive.
-    // Four is still taken whole -- on a width-2 back end chain4 is two fused
-    // pairs, which measures marginally better than two separate calls.
-    RiskJob jobs[4];
+    // COMPOSITION RULES, because this is where getting it wrong is invisible.
+    //
+    // The grouping follows the back end's real lane width, not the widest
+    // chainN that happens to exist. Every chainN is callable and correct, but
+    // a back end may implement some of them by composition: on x86 chain3 is
+    // chain2 + chain1, so the odd chain runs alone at the 1-lane rate and the
+    // group measures 39% WORSE than a two-job group (390.84 vs 640.46
+    // chains/s, Ryzen 7 170). That is the shape of bug to avoid -- never put a
+    // chain somewhere it runs alone inside a wider group.
+    //
+    // x86's width is 8 now, via a pipelined phase-split kernel that is a
+    // different kernel rather than a wider one (chain_x86.cpp). Below eight it
+    // has nothing new: its sub-eight compositions are still pairs. So the
+    // policy is deliberately "eight when eight are queued, otherwise exactly
+    // what this code did before chain8 existed":
+    //
+    //   queued >= 8, width 8   -> 8   one chain8 group
+    //   queued >= 4            -> 4   two fused pairs, as before
+    //   queued >= sub          -> largest multiple of sub, as before
+    //   otherwise              -> whatever is left (only 1 can reach here)
+    //
+    // where `sub` is the width the composed paths actually run at: 2 on a
+    // width-8 back end, and the width itself everywhere else. On ARM (width 4,
+    // a genuine four-lane interleave with genuine chain3/chain2 below it) and
+    // on the reference path (width 1) this is byte-for-byte the old behaviour,
+    // which is the point -- the only new case is the eight-wide one.
+    //
+    // Leaving a remainder queued rather than running it short is strictly
+    // better: under the graded load the queue sits deep at peak, so a partner
+    // is essentially always about to arrive. The shorter paths are what run
+    // during ramp-up and cool-down.
+    RiskJob jobs[kMaxBatch];
     int taken = 0;
     {
       std::unique_lock<std::mutex> lock(mutex_);
@@ -119,11 +146,14 @@ void RiskPool::worker_loop() {
       // Whole lane groups while the queue can fill them; otherwise drain what
       // is left rather than stalling behind a partner that may never come.
       const int queued = static_cast<int>(queue_.size());
+      const int sub = (width >= 8) ? 2 : width;
       int want;
-      if (queued >= 4) {
+      if (width >= 8 && queued >= 8) {
+        want = 8;
+      } else if (queued >= 4) {
         want = 4;
-      } else if (queued >= width) {
-        want = (queued / width) * width;
+      } else if (queued >= sub) {
+        want = (queued / sub) * sub;
       } else {
         want = queued;
       }
@@ -148,28 +178,48 @@ void RiskPool::worker_loop() {
       ++live;
     }
 
-    if (live == 4) {
-      std::string digest_a, digest_b, digest_c, digest_d;
-      risk_hash_x4(jobs[0].seed, jobs[1].seed, jobs[2].seed, jobs[3].seed,
-                   digest_a, digest_b, digest_c, digest_d);
-      on_done_(jobs[0], digest_a);
-      on_done_(jobs[1], digest_b);
-      on_done_(jobs[2], digest_c);
-      on_done_(jobs[3], digest_d);
-    } else if (live == 3) {
-      std::string digest_a, digest_b, digest_c;
-      risk_hash_x3(jobs[0].seed, jobs[1].seed, jobs[2].seed, digest_a, digest_b,
-                   digest_c);
-      on_done_(jobs[0], digest_a);
-      on_done_(jobs[1], digest_b);
-      on_done_(jobs[2], digest_c);
-    } else if (live == 2) {
-      std::string digest_a, digest_b;
-      risk_hash_x2(jobs[0].seed, jobs[1].seed, digest_a, digest_b);
-      on_done_(jobs[0], digest_a);
-      on_done_(jobs[1], digest_b);
-    } else if (live == 1) {
-      on_done_(jobs[0], risk_hash(jobs[0].seed));
+    // Consume the batch widest-group-first. `taken` is only ever 8, 4, 3, 2 or
+    // 1 by construction above, so the single-pass shapes below are the normal
+    // case; the loop exists because deadline shedding can remove jobs from the
+    // middle of a batch and leave a count the batcher would never have chosen
+    // (5, 6, 7). That path is unreachable unless RISK_DEADLINE_MS is set, and
+    // it degrades to a narrower composition rather than to anything wrong.
+    int i = 0;
+    while (i < live) {
+      const int rem = live - i;
+      if (rem >= 8) {
+        std::string seeds[8], digests[8];
+        for (int j = 0; j < 8; ++j) seeds[j] = jobs[i + j].seed;
+        risk_hash_x8(seeds, digests);
+        for (int j = 0; j < 8; ++j) on_done_(jobs[i + j], digests[j]);
+        i += 8;
+      } else if (rem >= 4) {
+        std::string digest_a, digest_b, digest_c, digest_d;
+        risk_hash_x4(jobs[i].seed, jobs[i + 1].seed, jobs[i + 2].seed,
+                     jobs[i + 3].seed, digest_a, digest_b, digest_c, digest_d);
+        on_done_(jobs[i], digest_a);
+        on_done_(jobs[i + 1], digest_b);
+        on_done_(jobs[i + 2], digest_c);
+        on_done_(jobs[i + 3], digest_d);
+        i += 4;
+      } else if (rem == 3) {
+        std::string digest_a, digest_b, digest_c;
+        risk_hash_x3(jobs[i].seed, jobs[i + 1].seed, jobs[i + 2].seed, digest_a,
+                     digest_b, digest_c);
+        on_done_(jobs[i], digest_a);
+        on_done_(jobs[i + 1], digest_b);
+        on_done_(jobs[i + 2], digest_c);
+        i += 3;
+      } else if (rem == 2) {
+        std::string digest_a, digest_b;
+        risk_hash_x2(jobs[i].seed, jobs[i + 1].seed, digest_a, digest_b);
+        on_done_(jobs[i], digest_a);
+        on_done_(jobs[i + 1], digest_b);
+        i += 2;
+      } else {
+        on_done_(jobs[i], risk_hash(jobs[i].seed));
+        i += 1;
+      }
     }
   }
 }

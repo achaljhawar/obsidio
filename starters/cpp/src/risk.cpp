@@ -170,6 +170,47 @@ bool verify_lane4(const chain::Backend& b) {
   return true;
 }
 
+// The eight-lane path is a different KIND of kernel from chain1..chain4, not a
+// wider copy of one: it phase-splits the message schedule into an L1 buffer and
+// pipelines two lane groups against each other, so a bug here would not look
+// like any bug the narrower lanes can have. It gets eight distinct seeds, and
+// it gets the odd round counts -- 1, 2, 3 -- because the pipeline primes one
+// group's schedule before the loop and a fencepost there would only show up on
+// the shortest chains.
+bool verify_lane8(const chain::Backend& b) {
+  const char* seeds[8] = {"0.5",      "0.9999",   "0.31415", "0.271828",
+                          "1.61803",  "2.71828",  "",        "0.000001"};
+  char h[8][kSha256HexBytes];
+  char o[8][kSha256HexBytes];
+  for (int i = 0; i < 8; ++i) first_round(seeds[i], h[i]);
+
+  for (const int iterations : {1, 2, 3, 4, 12, 33}) {
+    b.chain8(h, iterations - 1, o);
+    for (int i = 0; i < 8; ++i) {
+      if (chain_reference(seeds[i], iterations) !=
+          std::string(o[i], kSha256HexBytes)) {
+        return false;
+      }
+    }
+  }
+
+  // The lanes must not be aliased. Eight identical seeds must give eight
+  // identical answers, and the check above would pass even if the kernel
+  // silently copied lane 0 everywhere, so pair it with a run where all eight
+  // inputs differ only in the last character -- the cheapest way to catch a
+  // group-index slip between the A and B halves.
+  const char* twins[8] = {"0.10", "0.11", "0.12", "0.13",
+                          "0.14", "0.15", "0.16", "0.17"};
+  for (int i = 0; i < 8; ++i) first_round(twins[i], h[i]);
+  b.chain8(h, 16, o);
+  for (int i = 0; i < 8; ++i) {
+    if (chain_reference(twins[i], 17) != std::string(o[i], kSha256HexBytes)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 chain::Backend g_storage;
 const chain::Backend* g_backend = nullptr;
 bool g_rejected = false;
@@ -217,6 +258,10 @@ void select_backend() {
     g_storage.chain4 = nullptr;
     g_partial = true;
   }
+  if (g_storage.chain8 != nullptr && !verify_lane8(g_storage)) {
+    g_storage.chain8 = nullptr;
+    g_partial = true;
+  }
 }
 
 }  // namespace
@@ -230,6 +275,10 @@ int risk_lane_width() {
   // A lane that failed verification was nulled out above, and the risk_hash_xN
   // wrappers quietly compose around the hole. Narrow the batch instead, so the
   // pool stops assembling groups the back end can no longer run as one.
+  //
+  // Eight degrades to four rather than to seven: chain8 is the only eight-wide
+  // path, so without it the widest genuine group is whatever chain4 gives.
+  if (width >= 8 && g_backend->chain8 == nullptr) width = 4;
   if (width >= 4 && g_backend->chain4 == nullptr) width = 3;
   if (width >= 3 && g_backend->chain3 == nullptr) width = 2;
   if (width < 1) width = 1;
@@ -346,6 +395,27 @@ void risk_hash_x4(const std::string& seed_a, const std::string& seed_b,
   out_b.assign(rb, kSha256HexBytes);
   out_c.assign(rc, kSha256HexBytes);
   out_d.assign(rd, kSha256HexBytes);
+}
+
+void risk_hash_x8(const std::string seeds[8], std::string out[8],
+                  int iterations) {
+  init_risk_backend();
+  if (iterations <= 0 || g_backend == nullptr ||
+      g_backend->chain8 == nullptr) {
+    // Correct either way. Two four-lane groups rather than eight singles, so a
+    // back end without chain8 still gets whatever width it does have.
+    risk_hash_x4(seeds[0], seeds[1], seeds[2], seeds[3], out[0], out[1], out[2],
+                 out[3], iterations);
+    risk_hash_x4(seeds[4], seeds[5], seeds[6], seeds[7], out[4], out[5], out[6],
+                 out[7], iterations);
+    return;
+  }
+
+  char s[8][kSha256HexBytes];
+  char r[8][kSha256HexBytes];
+  for (int i = 0; i < 8; ++i) first_round(seeds[i], s[i]);
+  g_backend->chain8(s, iterations - 1, r);
+  for (int i = 0; i < 8; ++i) out[i].assign(r[i], kSha256HexBytes);
 }
 
 }  // namespace obsidio

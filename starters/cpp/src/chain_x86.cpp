@@ -355,6 +355,19 @@ inline Msg hex_to_msg(const Hex& h) {
   return m;
 }
 
+// The inverse of store_hex: 64 hex characters straight into registers, no
+// byte-swap. Only the eight-lane path needs it, because that one carries its
+// per-lane state as Hex between rounds so the schedule phase can byte-swap it
+// on its own schedule rather than at load time.
+inline Hex load_hex(const char in[64]) {
+  Hex h;
+  h.h0 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + 0));
+  h.h1 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + 16));
+  h.h2 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + 32));
+  h.h3 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + 48));
+  return h;
+}
+
 inline void store_hex(const Hex& h, char out[64]) {
   _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 0), h.h0);
   _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 16), h.h1);
@@ -559,9 +572,234 @@ void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
   chain2_impl(in_c, in_d, rounds, out_c, out_d);
 }
 
-const Backend kX86Backend = {"x86-sha-ni (register-resident x2; x3/x4 as pairs)",
-                             /*lanes=*/2, chain1_impl, chain2_impl, chain3_impl,
-                             chain4_impl};
+// ---------------------------------------------------------------------------
+// Eight lanes, pipelined phase-split.
+//
+// The two-lane kernel above is capped by a REGISTER argument: block 1 wants ~6
+// XMM per lane (2 state + 4 schedule window), so two lanes plus temporaries is
+// all the 16-entry file holds once sha256rnds2 has reserved XMM0. That cap is
+// real, but it only binds while the message schedule is live in registers.
+//
+// Phase-splitting moves the schedule out: expand a lane's message into an
+// L1-resident W+K buffer first, then run the rounds reading that buffer at 2
+// registers per lane. Measured, the round phase alone reaches 0.3058 ns/rnds2
+// against this kernel's 0.5456 -- 1.78x. But run as its own sequential phase
+// the schedule stops being free (it used to hide inside sha256rnds2's 4-cycle
+// latency) and costs 46% of the group-round, which ate the whole gain: the
+// straight phase-split measured +6.2% against a +15% floor and was rejected.
+// docs/phase-split-negative-result.md has that result in full.
+//
+// What works is putting the schedule back under the rounds without ever
+// holding both in registers at once. The obstacle is that a lane's own next
+// schedule depends on the hex its current round phase has not produced yet --
+// strictly serial, no way around it. So the pipeline runs across lane GROUPS:
+//
+//     prime:  schedule(A)
+//     step 1: rounds(A)  co-issued with  schedule(B)
+//     step 2: rounds(B)  co-issued with  schedule(A')
+//
+// Two steps advance all eight chains by one round, and each step's two halves
+// are independent. At most ONE schedule stream is live at a time -- lane 0's
+// rides block 1, lane 1's rides block 2, dealt out a step per rnds2 pair --
+// which is what keeps this inside the register file. Co-issuing four schedule
+// streams at once, the obvious thing to try, wants 28 registers and measures
+// -69%.
+//
+// Measured on a Ryzen 7 170, cool box, worst rep of 7, against this file's own
+// chain2 in the same process: 0.3679 ns/rnds2 against 0.5200, a 1.413x risk
+// path. Holding the round-phase width fixed, the co-issue alone is worth 27%.
+//
+// Known and deliberately not chased here: at four lanes per group only lanes 0
+// and 1 get their schedules co-issued. Lanes 2 and 3 fall through to
+// schedule_all() because a 16-pair block has nowhere left to deal them, so
+// roughly half the schedule is still paid for. Whether spreading the rest pays
+// or hits the register wall is unmeasured.
+
+// One resumable step of compress_generic's schedule: step P produces the
+// (W+K) vector the round phase consumes at pair P. Splitting it this way is
+// what lets the schedule be interleaved a step at a time between rnds2 pairs
+// instead of running as a block. The sequence is compress_generic's, unchanged
+// -- every RNDS2_PAIR there becomes a store here.
+template <int P>
+inline void sched_step(Msg& m, __m128i wk[16]) {
+  if constexpr (P == 0) {
+    wk[0] = _mm_add_epi32(m.m0, KV[0]);
+  } else if constexpr (P == 1) {
+    wk[1] = _mm_add_epi32(m.m1, KV[1]);
+    m.m0 = _mm_sha256msg1_epu32(m.m0, m.m1);
+  } else if constexpr (P == 2) {
+    wk[2] = _mm_add_epi32(m.m2, KV[2]);
+    m.m1 = _mm_sha256msg1_epu32(m.m1, m.m2);
+  } else if constexpr (P == 3) {
+    wk[3] = _mm_add_epi32(m.m3, KV[3]);
+  } else if constexpr (P >= 4 && P <= 13) {
+    // The steady-state group, rotating m0->m1->m2->m3 with period four:
+    // extend one vector with alignr+msg2, start the next one's msg1, store.
+    constexpr int r = (P - 4) % 4;
+    __m128i t;
+    if constexpr (r == 0) {
+      t = _mm_alignr_epi8(m.m3, m.m2, 4);
+      m.m0 = _mm_add_epi32(m.m0, t);
+      m.m0 = _mm_sha256msg2_epu32(m.m0, m.m3);
+      m.m2 = _mm_sha256msg1_epu32(m.m2, m.m3);
+      wk[P] = _mm_add_epi32(m.m0, KV[P]);
+    } else if constexpr (r == 1) {
+      t = _mm_alignr_epi8(m.m0, m.m3, 4);
+      m.m1 = _mm_add_epi32(m.m1, t);
+      m.m1 = _mm_sha256msg2_epu32(m.m1, m.m0);
+      m.m3 = _mm_sha256msg1_epu32(m.m3, m.m0);
+      wk[P] = _mm_add_epi32(m.m1, KV[P]);
+    } else if constexpr (r == 2) {
+      t = _mm_alignr_epi8(m.m1, m.m0, 4);
+      m.m2 = _mm_add_epi32(m.m2, t);
+      m.m2 = _mm_sha256msg2_epu32(m.m2, m.m1);
+      m.m0 = _mm_sha256msg1_epu32(m.m0, m.m1);
+      wk[P] = _mm_add_epi32(m.m2, KV[P]);
+    } else {
+      t = _mm_alignr_epi8(m.m2, m.m1, 4);
+      m.m3 = _mm_add_epi32(m.m3, t);
+      m.m3 = _mm_sha256msg2_epu32(m.m3, m.m2);
+      m.m1 = _mm_sha256msg1_epu32(m.m1, m.m2);
+      wk[P] = _mm_add_epi32(m.m3, KV[P]);
+    }
+  } else if constexpr (P == 14) {
+    // Only 64 words exist, so the last two groups need no further msg1.
+    const __m128i t = _mm_alignr_epi8(m.m1, m.m0, 4);
+    m.m2 = _mm_add_epi32(m.m2, t);
+    m.m2 = _mm_sha256msg2_epu32(m.m2, m.m1);
+    wk[14] = _mm_add_epi32(m.m2, KV[14]);
+  } else {
+    const __m128i t = _mm_alignr_epi8(m.m2, m.m1, 4);
+    m.m3 = _mm_add_epi32(m.m3, t);
+    m.m3 = _mm_sha256msg2_epu32(m.m3, m.m2);
+    wk[15] = _mm_add_epi32(m.m3, KV[15]);
+  }
+}
+
+#define OB_UNROLL16(X)                                                        \
+  X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7) X(8) X(9) X(10) X(11) X(12) X(13)   \
+  X(14) X(15)
+
+// All sixteen steps back to back, for the prime and for the lanes that have no
+// round phase left to hide under.
+inline void schedule_all(Msg m, __m128i wk[16]) {
+#define OB_SCHED_ALL(P) sched_step<P>(m, wk);
+  OB_UNROLL16(OB_SCHED_ALL)
+#undef OB_SCHED_ALL
+}
+
+constexpr int kPipeHalf = 4;
+
+// Advance four chains one full round while computing four other chains'
+// schedules for THEIR next round. hexR is read and overwritten; hexS is read
+// only, and its results land in wkS.
+inline void pipe_step(Hex hexR[kPipeHalf], __m128i wkR[kPipeHalf][16],
+                      const Hex hexS[kPipeHalf], __m128i wkS[kPipeHalf][16]) {
+  __m128i s0[kPipeHalf], s1[kPipeHalf];
+  for (int i = 0; i < kPipeHalf; ++i) {
+    s0[i] = kInitABEF;
+    s1[i] = kInitCDGH;
+  }
+
+  // Block 1: four lanes at two registers each, round constants from L1, with
+  // scheduled lane 0 dealt one step per pair.
+  Msg sa = hex_to_msg(hexS[0]);
+#define OB_PIPE_B1(P)                                             \
+  {                                                               \
+    __m128i k0 = wkR[0][P], k1 = wkR[1][P];                       \
+    __m128i k2 = wkR[2][P], k3 = wkR[3][P];                       \
+    s1[0] = _mm_sha256rnds2_epu32(s1[0], s0[0], k0);              \
+    s1[1] = _mm_sha256rnds2_epu32(s1[1], s0[1], k1);              \
+    s1[2] = _mm_sha256rnds2_epu32(s1[2], s0[2], k2);              \
+    s1[3] = _mm_sha256rnds2_epu32(s1[3], s0[3], k3);              \
+    k0 = _mm_shuffle_epi32(k0, 0x0E);                             \
+    k1 = _mm_shuffle_epi32(k1, 0x0E);                             \
+    k2 = _mm_shuffle_epi32(k2, 0x0E);                             \
+    k3 = _mm_shuffle_epi32(k3, 0x0E);                             \
+    s0[0] = _mm_sha256rnds2_epu32(s0[0], s1[0], k0);              \
+    s0[1] = _mm_sha256rnds2_epu32(s0[1], s1[1], k1);              \
+    s0[2] = _mm_sha256rnds2_epu32(s0[2], s1[2], k2);              \
+    s0[3] = _mm_sha256rnds2_epu32(s0[3], s1[3], k3);              \
+    sched_step<P>(sa, wkS[0]);                                    \
+  }
+  OB_UNROLL16(OB_PIPE_B1)
+#undef OB_PIPE_B1
+
+  // Block 1's feed-forward. Its input state was the IV, a constant, so nothing
+  // had to be kept live across the rounds to get here.
+  __m128i f0[kPipeHalf], f1[kPipeHalf];
+  for (int i = 0; i < kPipeHalf; ++i) {
+    f0[i] = _mm_add_epi32(s0[i], kInitABEF);
+    f1[i] = _mm_add_epi32(s1[i], kInitCDGH);
+    s0[i] = f0[i];
+    s1[i] = f1[i];
+  }
+
+  // Block 2: every lane consumes the same KW2V entry, so one register carries
+  // it for all four. Scheduled lane 1 rides here.
+  Msg sb = hex_to_msg(hexS[1]);
+#define OB_PIPE_B2(P)                                             \
+  {                                                               \
+    __m128i k = KW2V[P];                                          \
+    s1[0] = _mm_sha256rnds2_epu32(s1[0], s0[0], k);               \
+    s1[1] = _mm_sha256rnds2_epu32(s1[1], s0[1], k);               \
+    s1[2] = _mm_sha256rnds2_epu32(s1[2], s0[2], k);               \
+    s1[3] = _mm_sha256rnds2_epu32(s1[3], s0[3], k);               \
+    k = _mm_shuffle_epi32(k, 0x0E);                               \
+    s0[0] = _mm_sha256rnds2_epu32(s0[0], s1[0], k);               \
+    s0[1] = _mm_sha256rnds2_epu32(s0[1], s1[1], k);               \
+    s0[2] = _mm_sha256rnds2_epu32(s0[2], s1[2], k);               \
+    s0[3] = _mm_sha256rnds2_epu32(s0[3], s1[3], k);               \
+    sched_step<P>(sb, wkS[1]);                                    \
+  }
+  OB_UNROLL16(OB_PIPE_B2)
+#undef OB_PIPE_B2
+
+  // Lanes 2 and 3 have no rounds left to hide under; they are paid for.
+  for (int i = 2; i < kPipeHalf; ++i) schedule_all(hex_to_msg(hexS[i]), wkS[i]);
+
+  for (int i = 0; i < kPipeHalf; ++i) {
+    State st{_mm_add_epi32(s0[i], f0[i]), _mm_add_epi32(s1[i], f1[i])};
+    hexR[i] = state_to_hex(st);
+  }
+}
+
+void chain8_impl(const char in[8][64], int rounds, char out[8][64]) {
+  if (rounds <= 0) {
+    for (int i = 0; i < 8; ++i) std::memcpy(out[i], in[i], 64);
+    return;
+  }
+
+  Hex hex_a[kPipeHalf], hex_b[kPipeHalf];
+  alignas(64) __m128i wk_a[kPipeHalf][16];
+  alignas(64) __m128i wk_b[kPipeHalf][16];
+  for (int i = 0; i < kPipeHalf; ++i) {
+    hex_a[i] = load_hex(in[i]);
+    hex_b[i] = load_hex(in[kPipeHalf + i]);
+  }
+
+  // Group A's first schedule has no round phase to hide inside; one schedule
+  // out of `rounds`, and one more computed at the tail that is never consumed.
+  // Both are O(1) against 50,000 rounds.
+  for (int i = 0; i < kPipeHalf; ++i) schedule_all(hex_to_msg(hex_a[i]), wk_a[i]);
+
+  for (int r = 0; r < rounds; ++r) {
+    pipe_step(hex_a, wk_a, hex_b, wk_b);  // rounds(A) || schedule(B)
+    pipe_step(hex_b, wk_b, hex_a, wk_a);  // rounds(B) || schedule(A')
+  }
+
+  for (int i = 0; i < kPipeHalf; ++i) {
+    store_hex(hex_a[i], out[i]);
+    store_hex(hex_b[i], out[kPipeHalf + i]);
+  }
+}
+
+#undef OB_UNROLL16
+
+const Backend kX86Backend = {
+    "x86-sha-ni (pipelined phase-split x8; x2 register-resident)",
+    /*lanes=*/8, chain1_impl, chain2_impl, chain3_impl, chain4_impl,
+    chain8_impl};
 
 bool cpu_has_sha_ni() {
   __builtin_cpu_init();
