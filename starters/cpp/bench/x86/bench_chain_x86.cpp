@@ -71,9 +71,10 @@ int main() {
   std::printf("kernel: %s\n", b->name);
   std::printf("%d rounds per chain, median of %d reps\n\n", kRounds, kReps);
 
-  char h[4][64], o[4][64];
-  const char* seeds[4] = {"0.5", "0.9999", "0.31415", "0.271828"};
-  for (int i = 0; i < 4; ++i) first_round(seeds[i], h[i]);
+  char h[8][64], o[8][64];
+  const char* seeds[8] = {"0.5",     "0.9999",  "0.31415", "0.271828",
+                          "1.61803", "2.71828", "3.14159", "0.000001"};
+  for (int i = 0; i < 8; ++i) first_round(seeds[i], h[i]);
 
   // Correctness before speed: a kernel that is fast and wrong scores zero, and
   // a benchmark that does not check is how that ships.
@@ -130,6 +131,26 @@ int main() {
       s.push_back(4.0 / dt);
     }
     rows.push_back({"x4", 4, median_of(s)});
+  }
+  if (b->chain8 != nullptr) {
+    // Same rule as above: verified before timed. chain8 is a structurally
+    // different kernel (pipelined phase-split), so check it against chain2 on
+    // the same seeds rather than trusting the chain1 golden to cover it.
+    char c2[2][64];
+    b->chain2(h[0], h[1], kRounds - 1, c2[0], c2[1]);
+    b->chain8(h, kRounds - 1, o);
+    if (std::memcmp(o[0], c2[0], 64) != 0 || std::memcmp(o[1], c2[1], 64) != 0) {
+      std::printf("FAIL: chain8 lanes 0-1 disagree with chain2 on the same seeds.\n");
+      return 1;
+    }
+    std::vector<double> s;
+    for (int r = 0; r < kReps; ++r) {
+      const auto t0 = Clock::now();
+      b->chain8(h, kRounds - 1, o);
+      const double dt = std::chrono::duration<double>(Clock::now() - t0).count();
+      s.push_back(8.0 / dt);
+    }
+    rows.push_back({"x8", 8, median_of(s)});
   }
 
   std::printf("%6s  %14s  %14s  %s\n", "lanes", "chains/s", "ms/chain",
