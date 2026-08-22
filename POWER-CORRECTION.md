@@ -11,6 +11,9 @@ degrading ~2.18× over a session and attributed it to a clock drop from
 This document turns that open question into a procedure: audit the instrument,
 audit the policy, distinguish heat from cap, and re-baseline if needed.
 
+**Status: answered. See §5 for the measured verdict — it was neither heat
+nor policy; the 1.49 GHz reading was an instrument artifact.**
+
 ---
 
 ## 0. Why this matters
@@ -44,10 +47,10 @@ is known from microarchitecture tables, time N iterations with
 `steady_clock`, and report effective GHz.
 
 `starters/cpp/bench/effective_clock.cpp` (added on this branch) does this with
-a serial FP-add chain (4-cycle latency per link on all modern x86), reporting:
-
+a serial FP-add chain (`addsd`: 3 cycles/link on Zen, 4 on Intel — pass the
+right one, see §5.2), reporting:
 ```
-effective-clock: <X.XX> GHz   (dependent add-chain, 4 cycles/link)
+effective-clock: <X.XX> GHz   (chain latency=3.0 cyc/link, window=2.0s, best-of-3)
 ```
 
 Validate it once against a trusted Windows-side reading (HWiNFO64 / Ryzen
@@ -58,9 +61,10 @@ inside any container, WSL2 distro, cloud VM, or unknown grading hardware.
 ### Sanity expectations for this SKU-class
 
 An 8C/16T Ryzen sustaining all-core load should hold roughly 70–90% of boost
-on adequate cooling. **1.49 GHz ≈ 37% of a ~4 GHz nominal is far below genuine
-thermal behaviour for this class** unless cooling has failed outright — which
-is precisely why a policy cap is the leading suspect.
+on adequate cooling. **1.49 GHz is ~35% of the ~4.2 GHz this box actually
+sustains all-core (§5.2) — far below genuine thermal behaviour for this
+class** unless cooling has failed outright, which is why a policy cap was the
+leading suspect going in. It turned out to be neither.
 
 ## 2. Windows-side checks (run these on the box, in order)
 
@@ -118,6 +122,128 @@ Whichever way it resolves, redo once on corrected footing:
 
 And update `findings.md` §8's caveat with the verdict — that section already
 promises the reader the answer is pending.
+
+
+---
+
+## 5. Results — measured 2026-08-22
+
+The procedure above was run. **Verdict: neither heat nor policy. The 1.49 GHz
+figure was an instrument artifact.** The clock never collapsed.
+
+### 5.1 Policy audit (§2) — clean
+
+```
+powercfg /getactivescheme
+  Power Scheme GUID: 27fa6203-...-748559d549ec  (performance)
+
+powercfg /q SCHEME_CURRENT SUB_PROCESSOR
+  PROCTHROTTLEMAX   AC: 0x64 (100%)   DC: 0x64 (100%)
+  PROCTHROTTLEMIN   AC: 0x50  (80%)   DC: 0x05   (5%)
+
+Win32_Battery.BatteryStatus = 2  -> on AC
+Win32_Processor.MaxClockSpeed  = 3201 MHz
+```
+
+Maximum processor state is 100% on **both** AC and DC, and the machine was
+plugged in. There is no policy cap. The leading suspect is eliminated.
+
+Note the second correction hiding in that output: **nominal is 3.2 GHz base,
+not the "~4 GHz" findings.md §8 assumed.** The ~4 GHz figure was a boost
+number used as if it were a baseline, which inflated the claimed ratio.
+
+### 5.2 Sustained-load curve (§1 instrument) — a 1.7% sag, not 2.68×
+
+`effective_clock` built into a container off the pinned build stage, then run
+16-up (one container per core, `--cpuset-cpus=$i`) for 5.5 minutes of
+all-core load. `latency=3` (Zen `addsd`); `latency=4` yields a physically
+impossible 6.19 GHz, which confirms the 3-cycle figure for this part.
+
+```
+all-core mean effective-clock vs elapsed
+    0- 30s   4.054 GHz
+   60- 90s   3.991 GHz
+  150-180s   4.042 GHz
+  240-270s   3.999 GHz
+  300-330s   3.984 GHz
+                              n=2932 readings, min 3.171, mean 4.012
+```
+
+**4.054 -> 3.984 GHz: a 1.7% decay over the full window.** Single-core idle
+reads 4.637 GHz.
+
+### 5.3 Windows-side validation (the §1 calibration step)
+
+Sampled concurrently with that load, via
+`\Processor Information(*)\% Processor Performance` x 3201 MHz base:
+
+```
+t+0s    4,360 MHz  (136.2% of base)
+t+45s   4,292 MHz
+t+90s   4,238 MHz
+t+180s  4,234 MHz
+t+270s  4,250 MHz  (132.8%)
+```
+
+Windows says the box sustains **~4.23 GHz all-core, flat**. The in-container
+probe read 4.012 GHz against that — **~6% low**, the expected loop-overhead
+margin above pure `addsd` latency. The instrument is validated; record 0.94
+as its correction factor.
+
+Also confirmed in passing: `/proc/cpuinfo` inside the container reported a
+static `cpu MHz: 3193.912` throughout — the virtualized-and-useless reading
+§1 predicted.
+
+### 5.4 Why 1.49 GHz was wrong
+
+The number came from the v3 AVX2-mix harness's own clock loop, and **that
+source was never committed** — `git log --all --diff-filter=A` over every
+branch shows no such file ever existed in the repo. It cannot be re-run or
+audited; it survives only as a figure quoted in prose.
+
+findings.md §7.2 already documents that same harness getting the clock wrong
+twice: v1 "miscounted (a 3-cycle chain divided by 2)", and v2 was folded to a
+closed form by GCC and reported "5,747,126 GHz". v3 fixed the folding with an
+`asm volatile` barrier — but nothing in the record shows it fixed the
+cycles-per-link divisor that broke v1. A 3-cycle chain scored as if it were
+~8.5 cycles would report ~1.49 GHz on a core actually running at ~4.2.
+
+An unreproducible reading from a harness with two documented clock bugs, in
+direct contradiction to two independent validated instruments, is not
+evidence of throttling.
+
+### 5.5 What this leaves open
+
+The score degradation itself was measured and is not in dispute: 5,781,894 ->
+2,656,259 `work_score`, with `/price` p95 degrading in step. **What is now
+unexplained is the cause** — it was not clock. Since `/price` never touches
+the hash chain, the mechanism is something that slows everything uniformly:
+Docker Desktop VM memory pressure, page-cache/balloon behaviour across a long
+session, k6 co-location on the same 16 threads, or accumulated background
+load. That is the question §8 should now be asking.
+
+**One honest gap in this run:** the load was a scalar-FP dependency chain,
+which draws less package power than SHA-NI plus full request serving. It
+rules out a 2.68x collapse; it does not by itself prove the graded workload
+holds 4.2 GHz. Closing that costs one run — `effective_clock -w` on a spare
+core alongside the actual graded k6 run, which now also produces the
+NEXT-LEVERS §2 clock-vs-time graph directly.
+
+### 5.6 Consequences
+
+- findings.md line 19 ("**thermally throttles to 1.49 GHz**") and the §8
+  clock row are **retracted**. §8's own open question is answered: not policy,
+  not heat, instrument.
+- NEXT-LEVERS §2 ("efficiency is thermal headroom") loses its premise. With a
+  1.7% sag there is no meaningful thermal feedback loop to exploit; demote it
+  from P1.
+- NEXT-LEVERS §7/§8 "Windows power plan check — possibly re-rates every
+  number" is **closed, negative**: the plan was never capping, so nothing is
+  re-rated upward.
+- The `findings.md` §8 conclusion that survives untouched is the one that
+  mattered most: absolute numbers from this box drift badly, and only
+  tightly-alternated A/B ratios are trustworthy. The cause changed; the
+  methodological discipline it justified was correct anyway.
 
 *Related: NEXT-LEVERS.md §1 (fast-path CPU diet) and §2 (efficiency = thermal
 headroom) are the two levers whose value changes most depending on this
