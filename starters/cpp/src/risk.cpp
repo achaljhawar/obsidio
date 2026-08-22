@@ -72,7 +72,17 @@ void first_round(const std::string& seed, char out[kSha256HexBytes]) {
 // startup. A wrong digest is worth zero and fails silently -- it still looks
 // like 64 plausible hex characters -- so the cost of being wrong is the whole
 // score. Verification costs microseconds; it is not optional.
-bool verify_backend(const chain::Backend& b) {
+//
+// Verification is per entry point, not all-or-nothing. chain1/chain2 are the
+// core: they were the paths verified on real silicon, and without them the
+// back end has nothing to offer, so a core failure rejects the whole thing and
+// we serve from the fast scalar fallback instead. chain3/chain4 reuse the same
+// verified instruction sequences and differ only in scheduling order, but if
+// either ever disagreed with the oracle -- on any future hardware, after any
+// future edit -- nulling that single pointer degrades the pool to fewer lanes
+// while keeping the accelerated core. A whole-back-end rejection here would
+// cost ~7x throughput over a one-lane drop.
+bool verify_core(const chain::Backend& b) {
   // Seeds chosen to cover what the endpoint can actually receive: a normal k6
   // seed, the empty-seed sentinel, an odd length, and the empty string.
   const char* seeds[] = {"0.5", "none", "0.4821", "", "0.123456789012345"};
@@ -93,8 +103,8 @@ bool verify_backend(const chain::Backend& b) {
 
   // chain2 must agree with chain1 -- an interleaving bug that crosses the two
   // lanes would otherwise be invisible until it shipped.
-  char ha[kSha256HexBytes], hb[kSha256HexBytes], hc[kSha256HexBytes];
-  char oa[kSha256HexBytes], ob[kSha256HexBytes], oc[kSha256HexBytes];
+  char ha[kSha256HexBytes], hb[kSha256HexBytes];
+  char oa[kSha256HexBytes], ob[kSha256HexBytes];
   first_round("0.5", ha);
   first_round("0.9999", hb);
   for (const int iterations : {1, 2, 12, 33}) {
@@ -106,9 +116,16 @@ bool verify_backend(const chain::Backend& b) {
       return false;
     }
   }
+  return true;
+}
 
-  // Same again for chain3. The third lane is the one most likely to be dropped
-  // or aliased by a copy-paste slip, so it gets a distinct seed of its own.
+// The third lane is the one most likely to be dropped or aliased by a
+// copy-paste slip, so it gets distinct seeds of its own.
+bool verify_lane3(const chain::Backend& b) {
+  char ha[kSha256HexBytes], hb[kSha256HexBytes], hc[kSha256HexBytes];
+  char oa[kSha256HexBytes], ob[kSha256HexBytes], oc[kSha256HexBytes];
+  first_round("0.5", ha);
+  first_round("0.9999", hb);
   first_round("0.31415", hc);
   for (const int iterations : {1, 2, 12, 33}) {
     b.chain3(ha, hb, hc, iterations - 1, oa, ob, oc);
@@ -122,9 +139,18 @@ bool verify_backend(const chain::Backend& b) {
       return false;
     }
   }
+  return true;
+}
 
-  // And chain4, with a fourth distinct seed.
-  char hd[kSha256HexBytes], od[kSha256HexBytes];
+// And lane four, with a fourth distinct seed.
+bool verify_lane4(const chain::Backend& b) {
+  char ha[kSha256HexBytes], hb[kSha256HexBytes], hc[kSha256HexBytes],
+      hd[kSha256HexBytes];
+  char oa[kSha256HexBytes], ob[kSha256HexBytes], oc[kSha256HexBytes],
+      od[kSha256HexBytes];
+  first_round("0.5", ha);
+  first_round("0.9999", hb);
+  first_round("0.31415", hc);
   first_round("0.271828", hd);
   for (const int iterations : {1, 2, 12, 33}) {
     b.chain4(ha, hb, hc, hd, iterations - 1, oa, ob, oc, od);
@@ -144,25 +170,52 @@ bool verify_backend(const chain::Backend& b) {
   return true;
 }
 
+chain::Backend g_storage;
 const chain::Backend* g_backend = nullptr;
 bool g_rejected = false;
+bool g_partial = false;
+const char* g_forced = nullptr;
 std::once_flag g_select_once;
 
 void select_backend() {
-  // RISK_BACKEND=reference forces the slow path. This exists so the accelerated
-  // and reference builds can be A/B'd on the same box, same binary, same run --
-  // which is the only honest way to quote a speedup.
+  // RISK_BACKEND forces a specific path, so accelerated and reference builds
+  // can be A/B'd on the same box, same binary, same run -- the only honest way
+  // to quote a speedup. "reference" serves from the scalar fallback; "arm" and
+  // "x86-sha-ni" each try exactly one accelerated back end, which is what the
+  // Dockerfile's forced self-test passes use to exercise a specific one on its
+  // real target hardware. Unset selects automatically: ARM crypto first, then
+  // x86 SHA-NI.
   const char* forced = std::getenv("RISK_BACKEND");
-  if (forced != nullptr && std::strcmp(forced, "reference") == 0) return;
-
-  const chain::Backend* candidate = chain::arm_crypto_backend();
+  const chain::Backend* candidate = nullptr;
+  if (forced != nullptr && std::strcmp(forced, "reference") == 0) {
+    g_forced = forced;
+    return;
+  }
+  if (forced == nullptr || std::strcmp(forced, "arm") == 0) {
+    candidate = chain::arm_crypto_backend();
+  }
+  if (candidate == nullptr &&
+      (forced == nullptr || std::strcmp(forced, "x86-sha-ni") == 0)) {
+    candidate = chain::x86_sha_backend();
+  }
+  if (forced != nullptr && forced[0] != '\0') g_forced = forced;
   if (candidate == nullptr) return;  // no accelerated back end for this CPU
-  if (verify_backend(*candidate)) {
-    g_backend = candidate;
-  } else {
-    // Correctness wins: fall back rather than serve fast wrong digests. The
-    // self-test turns this into a build failure so it can never ship unnoticed.
+
+  if (!verify_core(*candidate)) {
+    // Correctness wins: fall back rather than serve fast wrong digests.
     g_rejected = true;
+    return;
+  }
+
+  g_storage = *candidate;
+  g_backend = &g_storage;
+  if (!verify_lane3(g_storage)) {
+    g_storage.chain3 = nullptr;
+    g_partial = true;
+  }
+  if (!verify_lane4(g_storage)) {
+    g_storage.chain4 = nullptr;
+    g_partial = true;
   }
 }
 
@@ -172,7 +225,10 @@ void init_risk_backend() { std::call_once(g_select_once, select_backend); }
 
 const char* risk_backend_name() {
   init_risk_backend();
-  if (g_backend != nullptr) return g_backend->name;
+  if (g_backend != nullptr) {
+    if (g_partial) return "accelerated (some lanes degraded to fewer)";
+    return g_backend->name;
+  }
   return g_rejected ? "reference (accelerated back end REJECTED)"
                     : "reference (specialised 64-byte transform)";
 }
@@ -180,6 +236,19 @@ const char* risk_backend_name() {
 bool risk_backend_rejected() {
   init_risk_backend();
   return g_rejected;
+}
+
+bool risk_backend_partial() {
+  init_risk_backend();
+  return g_partial;
+}
+
+// The RISK_BACKEND value this process was started with, or nullptr. The
+// self-test uses it to distinguish "forced back end absent on this CPU, skip"
+// from a real verification failure.
+const char* risk_backend_forced() {
+  init_risk_backend();
+  return g_forced;
 }
 
 std::string risk_hash(const std::string& seed, int iterations) {
@@ -217,7 +286,8 @@ void risk_hash_x3(const std::string& seed_a, const std::string& seed_b,
                   const std::string& seed_c, std::string& out_a,
                   std::string& out_b, std::string& out_c, int iterations) {
   init_risk_backend();
-  if (g_backend == nullptr || iterations <= 0) {
+  if (iterations <= 0 || g_backend == nullptr ||
+      g_backend->chain3 == nullptr) {
     // Correct either way, just without the interleaving win.
     out_a = risk_hash(seed_a, iterations);
     out_b = risk_hash(seed_b, iterations);
@@ -241,7 +311,8 @@ void risk_hash_x4(const std::string& seed_a, const std::string& seed_b,
                   std::string& out_a, std::string& out_b, std::string& out_c,
                   std::string& out_d, int iterations) {
   init_risk_backend();
-  if (g_backend == nullptr || iterations <= 0) {
+  if (iterations <= 0 || g_backend == nullptr ||
+      g_backend->chain4 == nullptr) {
     out_a = risk_hash(seed_a, iterations);
     out_b = risk_hash(seed_b, iterations);
     out_c = risk_hash(seed_c, iterations);

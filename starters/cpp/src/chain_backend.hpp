@@ -48,5 +48,9 @@ struct Backend {
 // CPU does not advertise the ARMv8 SHA-2 extension.
 const Backend* arm_crypto_backend();
 
+// Returns nullptr when this build was not compiled for x86-64, or when the
+// CPU does not advertise SHA-NI (plus SSSE3/SSE4.1).
+const Backend* x86_sha_backend();
+
 }  // namespace chain
 }  // namespace obsidio

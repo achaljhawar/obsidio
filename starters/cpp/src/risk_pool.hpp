@@ -44,6 +44,14 @@ class RiskPool {
   // Returns false if the queue is full (caller should shed with 503).
   bool submit(RiskJob job);
 
+  // Signals workers to exit. Async-signal-safe (one atomic store): this is
+  // what the signal handler calls, because joining threads from a signal
+  // handler is not -- if SIGTERM lands on a worker thread, join() would target
+  // itself and std::terminate the process mid-restart.
+  void request_stop();
+
+  // Joins all workers. Call only from a normal thread (main), never from a
+  // signal handler.
   void stop();
 
   std::size_t queue_depth() const;

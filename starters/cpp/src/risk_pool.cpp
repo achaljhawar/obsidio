@@ -60,8 +60,10 @@ bool RiskPool::submit(RiskJob job) {
   return true;
 }
 
+void RiskPool::request_stop() { stopping_.store(true, std::memory_order_relaxed); }
+
 void RiskPool::stop() {
-  if (stopping_.exchange(true)) return;
+  request_stop();
   cv_.notify_all();
   for (auto& t : workers_) {
     if (t.joinable()) t.join();
@@ -95,9 +97,12 @@ void RiskPool::worker_loop() {
     int taken = 0;
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      cv_.wait(lock, [this] {
-        return stopping_.load(std::memory_order_relaxed) || !queue_.empty();
-      });
+      // Timed wait rather than cv_.wait: request_stop() is a bare atomic store
+      // (it must be async-signal-safe, so it cannot notify), and this bounds
+      // shutdown latency to the wait interval without one.
+      while (!stopping_.load(std::memory_order_relaxed) && queue_.empty()) {
+        cv_.wait_for(lock, std::chrono::milliseconds(100));
+      }
       if (queue_.empty()) return;  // stopping and drained
       while (taken < 4 && !queue_.empty()) {
         jobs[taken++] = std::move(queue_.front());

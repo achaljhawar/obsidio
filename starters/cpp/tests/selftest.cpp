@@ -8,6 +8,7 @@
 // Golden values generated with Python's hashlib; cross-check any of them with:
 //   python3 -c "import hashlib;h='0.5';[h:=hashlib.sha256(h.encode()).hexdigest() for _ in range(50000)];print(h)"
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "../src/risk.hpp"
@@ -229,18 +230,51 @@ int main() {
   }
 
   // -------------------------------------------------------------------------
-  // A rejected back end is not a correctness failure -- risk.cpp falls back to
-  // the reference chain and every digest above still passes -- but it silently
-  // costs ~7x throughput, which is the whole competition. On an architecture
-  // that HAS an accelerated back end, rejection means the back end is buggy,
-  // and that must fail the build rather than ship quietly slow.
+  // Back end status. Semantics depend on how this run was invoked:
+  //
+  //   RISK_BACKEND unset / "reference"  (the default and oracle passes)
+  //     A rejected accelerated back end is not a correctness failure -- the
+  //     fallback serves correct digests and every check above still passes --
+  //     but it silently costs ~7x throughput, which is the whole competition.
+  //     On an architecture that HAS an accelerated back end, a core rejection
+  //     means the back end is buggy: fail the build rather than ship quietly
+  //     slow. A partial lane rejection only costs some lanes, so it warns.
+  //
+  //   RISK_BACKEND=arm / x86-sha-ni     (forced passes from the Dockerfile)
+  //     These exist to exercise one specific accelerated back end on real
+  //     hardware. If the CPU simply does not have it, SKIP (exit 0) -- the
+  //     same image must build on either architecture. If the CPU has it and
+  //     it fails verification, that is exactly the bug these passes exist to
+  //     catch: FAIL.
   std::printf("\nHash back end\n");
   std::printf("  selected: %s\n", obsidio::risk_backend_name());
+  const char* forced = obsidio::risk_backend_forced();
+  const bool accelerated_forced =
+      forced != nullptr &&
+      (std::strcmp(forced, "arm") == 0 || std::strcmp(forced, "x86-sha-ni") == 0);
+
   if (obsidio::risk_backend_rejected()) {
     std::printf(
         "  FAIL  an accelerated back end was available but FAILED "
         "self-verification\n");
     ++g_failures;
+  } else if (accelerated_forced && obsidio::risk_backend_partial()) {
+    // Under a forced accelerated pass, a dropped lane means that lane's code
+    // is wrong on this CPU. The default pass degrades gracefully in production;
+    // here it must be loud enough to break the build.
+    std::printf(
+        "  FAIL  forced back end verified its core but DROPPED a lane\n");
+    ++g_failures;
+  } else if (obsidio::risk_backend_partial()) {
+    std::printf(
+        "  WARN  accelerated core verified but a wide lane was disabled; "
+        "pool degraded to fewer lanes\n");
+  } else if (accelerated_forced && std::strstr(obsidio::risk_backend_name(),
+                                               "reference") != nullptr) {
+    std::printf("  SKIP  forced back end \"%s\" not available on this CPU\n",
+                forced);
+    std::printf("\nskipped (forced back end unavailable)\n");
+    return 0;
   }
 
   if (g_failures == 0) {

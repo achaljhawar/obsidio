@@ -61,6 +61,8 @@ class Server {
   // Blocks until stop() is called.
   void run();
 
+  // Signals the IO loops to exit. Async-signal-safe (one atomic store plus
+  // write()): this is what the signal handler calls.
   void stop();
 
   // Finish a deferred request. Safe to call from any thread.

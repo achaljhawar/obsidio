@@ -53,9 +53,20 @@ void init_risk_backend();
 // Human-readable name of the selected back end, for the startup banner.
 const char* risk_backend_name();
 
-// True when this CPU offers an accelerated back end but it failed to reproduce
-// the reference digests, so the slow fallback is in use. Always false when the
-// architecture simply has no back end. The self-test fails the build on this.
+// True when this CPU offers an accelerated back end but its core (chain1 or
+// chain2) failed to reproduce the reference digests, so the slow fallback is
+// in use. Always false when the architecture simply has no back end. The
+// self-test fails the build on this.
 bool risk_backend_rejected();
+
+// True when the accelerated core verified but one of the wider lanes (chain3 /
+// chain4) did not, so that lane was disabled and the pool degrades to fewer
+// lanes. Correct answers either way; the self-test reports it loudly.
+bool risk_backend_partial();
+
+// The RISK_BACKEND value this process was started with, or nullptr. Lets the
+// self-test distinguish "forced back end absent on this CPU, skip" from a real
+// verification failure.
+const char* risk_backend_forced();
 
 }  // namespace obsidio
