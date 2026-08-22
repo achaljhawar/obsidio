@@ -101,6 +101,13 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64"
   add_executable(obsidio-bench-chain bench/x86/bench_chain_x86.cpp)
   target_link_libraries(obsidio-bench-chain PRIVATE obsidio_core)
   target_compile_options(obsidio-bench-chain PRIVATE -O2)
+
+  # Isolates the AVX/SSE transition penalty from genuine port contention. See
+  # the comment at the top of the file: rnds2_ports.cpp's co-issue arm reports
+  # ~-98% and reads it as saturated issue ports, but the same experiment with
+  # 128-bit co-issue costs nothing at all.
+  add_executable(obsidio-avx-transition bench/x86/avx_transition.cpp)
+  target_compile_options(obsidio-avx-transition PRIVATE -O2 -msha -mssse3 -msse4.1 -mavx2)
 endif()
 
 enable_testing()

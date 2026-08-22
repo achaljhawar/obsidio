@@ -159,6 +159,11 @@ sample_cpu() {
 run_probe() {
   local extra=()
   [ -n "$VUS" ] && extra+=(-e "VUS=$VUS")
+  # mixed_probe.js reads RISK_PCT, but it was never forwarded into the k6
+  # container, so `RISK_PCT=0 ./ab.sh` silently measured the default 10% risk
+  # mix instead of the cheap-only mix -- and any CPU-per-cheap-request figure
+  # derived from it was wrong.
+  [ -n "${RISK_PCT:-}" ] && extra+=(-e "RISK_PCT=$RISK_PCT")
   docker run --rm --network "$NET" --cpuset-cpus="$K6_CPUSET" \
     -v "$HERE:/scripts:ro" \
     -e "TARGET=http://$CTR:8080" -e "DURATION=$DURATION" ${extra[@]+"${extra[@]}"} \
