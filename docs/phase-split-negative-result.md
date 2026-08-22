@@ -142,28 +142,78 @@ file, again, exactly as in Stage 1.
 
 ## 6. The one branch not closed, and the arithmetic on it
 
+> **Corrected 2026-08-23, in review.** The first version of this section said
+> "about 60% of the schedule would have to disappear" and concluded
+> *tight-to-negative*. That inverted a ratio: 0.1605/0.2619 = 61% is the
+> fraction of the schedule that may **survive exposed**, so the fraction that
+> must disappear is 39%, not 60%. A second error sat underneath it — the
+> `stage2_probes` requirement line assumed one msg op per block-1 `rnds2` when
+> the real sequence has 0.75, overstating the requirement by 4/3. Both are
+> fixed below. The corrected arithmetic points the other way: this branch is
+> **tight-to-positive**, and it is the highest-expected-value work left.
+
 Stage 2 as specified runs its phases sequentially. The obvious repair is to
-**software-pipeline** them: run round phase for round *r* while computing one
-lane's schedule for round *r+1*, so the schedule goes back to hiding inside
+**software-pipeline** them: run the round phase for round *r* while computing
+one lane's schedule for round *r+1*, so the schedule goes back to hiding inside
 `rnds2` latency instead of being paid for.
 
-The arithmetic is close enough to be worth stating rather than dismissing. To
-clear +15% the risk path needs 1.17×, i.e. a group-round of 0.4663 ns/rnds2.
-The round phase costs 0.3058, so the schedule budget is 0.1605 against a
-measured 0.2619 — **about 60% of the schedule would have to disappear into the
-round phase.**
+**The op accounting**, since everything below depends on it.
+`compress_generic`'s schedule is **12 `sha256msg1` + 12 `sha256msg2` per block
+1**, and block 2 has none. That is 24 SHA-unit ops against block 1's 32
+`rnds2`, so over a whole 64-`rnds2` round it is **0.375 msg-ops per `rnds2`**.
+Confirmed by `objdump` on `bench_phase_split`'s inlined `schedule_lane`
+(`palignr` cross-checks at 12 per copy). The other 24 schedule ops per block —
+`alignr` and `add` — are ordinary vector ops on other ports.
 
-Probe C says one co-issued stream is free and delivers 1070 M msg-ops/s. Four
-lanes need roughly 2157 M/s. So one free stream covers about half — short of
-the 60% needed, and a second stream costs 18 registers and halves the round
-rate.
+**The budget.** To clear +15% the risk path needs 1.17×, i.e. a group-round of
+0.5456/1.17 = **0.4663 ns/rnds2**. Co-issuing one schedule stream costs the
+round phase 4.1% in the canonical Probe C run (4275.7 → 4105.9 M rnds2/s; the
+range across three runs is 0% to 7.8%), so the round phase goes 0.3058 →
+**0.3184**. That leaves **0.1479** for exposed schedule against a measured
+0.2619, so the fraction that must be hidden is
 
-**So it is tight-to-negative, and it is genuinely untested.** It is a different
-design from the one Phase 1 was asked to measure, and this repo has now twice
-watched an untested projection in exactly this margin miss badly. It should be
-a probe, not a kernel: extend `bench_phase_split.cpp` with a pipelined variant
-and measure the joint. A day, with a hard gate at 1.17×. Not authorised here;
-recorded so the next person does not have to re-derive it.
+    1 − 0.1479/0.2619 = 43.5%
+
+**What one stream actually hides.** A round phase at 0.3184 ns/rnds2 runs at
+3140 M rnds2/s, which demands 0.375 × 3140 = **1178 M msg-ops/s**. One
+co-issued stream supplies **1070.7 M/s** — about **91%**, not the ~50% the
+first version claimed off the inflated requirement. Carrying the residual
+through: 9% of 0.2619 = 0.024 ns exposed, total ≈ **0.342 ns/rnds2**,
+r ≈ **1.59×**, ≈ **+51% `work_score`**.
+
+**And that is the number to distrust.** It lands above the +45% the plan called
+its realistic ceiling, off a single 13-register measurement extrapolated onto a
+structure that has never been built. The bounds are what matter:
+
+| if the pipelined round phase… | round ns | total | r | score |
+|---|---|---|---|---|
+| absorbs the schedule entirely | 0.3184 | 0.318 | 1.71× | +61% |
+| behaves as the model above | 0.3184 | 0.342 | 1.59× | +51% |
+| hits the streams=2 register cliff | 0.6309 | ~0.65 | 0.84× | **−15%** |
+
+**The whole question is whether the register file holds**, and nothing measured
+so far answers it. Probe C's streams=1 arm fits in 13 registers because its
+round phase is a toy: four lanes of 2 state registers with the round constant
+in one shared register. Stage 2's *real* round phase additionally needs a
+per-lane `msg` temporary loaded from the W+K buffer and the block-1
+feed-forward values live across the block-1→block-2 boundary. Adding a
+5-register schedule stream to *that* is the untested step, and the streams=2
+row shows what crossing the file costs: the round rate halves and the design
+lands below the shipped kernel.
+
+Transplanting Probe C's light-round-phase co-issue number onto Probe A's heavy
+round phase is exactly the error that killed Stage 1 at −23% and Stage 2 at
++6.2%: joining two separately-measured halves across the register boundary they
+have to share. The arithmetic above is that error, written out deliberately so
+it can be seen.
+
+**So the conclusion is unchanged and the reason for it is stronger.** This is a
+probe, never a kernel: extend `bench_phase_split.cpp` with a pipelined variant
+and measure the joint, digests first. A day, hard gate at 1.17×. What has
+changed is its priority — a band of −15% to +61% on one day of measurement is
+the best expected value left on the table, well ahead of Phase 4's mechanical
++3–6%. Not authorised here; recorded so the next person does not re-derive it,
+and does not re-derive it wrong.
 
 ## 7. What still stands
 
@@ -182,9 +232,12 @@ The plan's ledger had Stage 2 as the single remaining item with +15% to +45% in
 it. It is now closed at +6.2% measured, on the structure that would have
 shipped, with the mechanism understood and a written cause.
 
-That leaves Phase 4 — the floor plan — as the live work: LTO/PGO/clang sweep,
-fast-path profiling of the 18 µs, spin-then-sleep workers, `vzeroupper` after
-round zero. +3–6% combined, no measurement risk, plus the resilience write-up,
+What that leaves, in expected-value order: **the pipelined probe of §6** — one
+day, a −15% to +61% band, and the only thing measured so far that could still
+move the score materially — and then Phase 4, the floor plan: LTO/PGO/clang
+sweep, fast-path profiling of the 18 µs, spin-then-sleep workers, `vzeroupper`
+after round zero. +3–6% combined, no measurement risk, plus the resilience
+write-up,
 which is worth more than any of them and is now considerably richer: two
 retractions with controlled diagnostics, three harness bugs caught before they
 wrote wrong conclusions into the record, and a measurement discipline that has

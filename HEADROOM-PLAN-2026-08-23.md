@@ -203,12 +203,20 @@ Two corrections to this plan, recorded because they cost time:
 
 One branch is left open and is *not* authorised here: software-pipelining the
 two phases, so the schedule for round *r+1* hides inside the round phase for
-*r*. The budget needs ~60% of the schedule to disappear; Probe C says one free
-co-issued stream covers about half. Tight-to-negative, genuinely untested, and
-worth exactly one more probe with a hard gate at 1.17× — never a kernel. §6 of
-the write-up has the arithmetic.
+*r*. **43.5%** of the schedule has to disappear for 1.17×; one co-issued stream
+supplies 1070.7 M msg-ops/s against a requirement of 1178 M/s, so on paper it
+covers ~91% and the design projects **≈ +51%**.
 
-**Phase 2 is not entered. Go to Phase 4.**
+That paper is not to be trusted — it lands above the plan's own +45% ceiling
+off a 13-register measurement extrapolated onto a structure nobody has built,
+and the honest band is **−15% to +61%**, hinging entirely on whether the XMM
+file holds when a 5-register schedule stream is added to Stage 2's real round
+phase. Probe C's streams=2 row is what the downside looks like. So: exactly one
+more probe, hard gate at 1.17×, never a kernel — but it is now the
+**highest-expected-value work left**, ahead of Phase 4's mechanical +3–6%. §6
+of the write-up has the full arithmetic and the correction history.
+
+**Phase 2 is not entered. The pipelined probe, then Phase 4.**
 
 ---
 

@@ -480,10 +480,24 @@ int main() {
     // Stage 2 needs 1.5 schedule ops per block-1 rnds2, of which 1.0 are
     // msg1/msg2 -- so per rnds2 across a whole round (block 2 has no schedule
     // at all) it needs 0.5 SHA-unit schedule ops per rnds2.
-    std::printf("\n  Stage 2's requirement: 1 msg1/msg2 per block-1 rnds2,\n");
-    std::printf("  i.e. 0.5 SHA-unit schedule ops per rnds2 over a whole round.\n");
+    // Count the real sequence rather than the synthetic one this arm runs.
+    // compress_generic's schedule is 12 sha256msg1 + 12 sha256msg2 per block 1
+    // -- confirmed by objdump on bench_phase_split's inlined schedule_lane --
+    // so 24 SHA-unit ops against block 1's 32 rnds2, and block 2 needs none at
+    // all. Over a whole 64-rnds2 round that is 24/64 = 0.375 per rnds2.
+    //
+    // This line previously said 0.5, from assuming one msg op per block-1
+    // rnds2 instead of the actual 0.75. It overstated the requirement by 4/3
+    // and the error reached a design note before review caught it.
+    constexpr double kMsgOpsPerRnds2 = 24.0 / 64.0;
+    std::printf("\n  Stage 2's requirement: 12 sha256msg1 + 12 sha256msg2 per\n");
+    std::printf("  block 1 (32 rnds2), none in block 2 -- so %.3f SHA-unit\n",
+                kMsgOpsPerRnds2);
+    std::printf("  schedule ops per rnds2 over a whole round.\n");
     std::printf("  At the 4-lane bare rate of %.0f M rnds2/s that is %.0f M sched/s.\n",
-                bare4.worst / 1e6, 0.5 * bare4.worst / 1e6);
+                bare4.worst / 1e6, kMsgOpsPerRnds2 * bare4.worst / 1e6);
+    std::printf("  NOTE: the streams above run a synthetic 4-ops-per-pair group,\n");
+    std::printf("  which is 4/3 denser in msg ops than the real sequence.\n");
   }
 
   // Diagnostic ---------------------------------------------------------------
