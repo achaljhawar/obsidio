@@ -32,7 +32,7 @@ failing a gate costs at most a day.
 | Stage 1 (wide block 2) | **Dead**: −23% measured; retraction on both branches |
 | `SCHED_IDLE`/scheduler tuning, `IO_THREADS=1`, x3 batching | **Dead**, closed by measurement |
 | Stage 2 (phase-split block 1) | **Live**, gated on three unmeasured quantities — the subject of this plan |
-| Baseline | 5,767,977 cool-state, **taken before the two landed perf commits** |
+| Baseline | **5,818,877 cool-state**, 2026-08-23, after both landed perf commits (was 5,767,977 before them — see Phase 0 result) |
 
 ---
 
@@ -65,6 +65,39 @@ branches and two untracked files.
    kernel later would corrupt the Stage 2 verdict.
 
 **Exit state:** one branch, one baseline number, a rerunnable harness.
+
+### Phase 0 result — executed 2026-08-23
+
+Done: both branches merged (`src/` byte-identical to `b37408b` throughout, tree
+`0fdb99d`), the findings filed under `docs/history/`, `rnds2_ports.cpp`'s
+falsified verdict retracted, and the Windows harness workaround codified as
+`bench/ryzen/run-harness-windows.sh`.
+
+**Baseline of record: `work_score` 5,818,877.** Full unmodified grading script,
+cool box (15 min idle), on AC (`Win32_Battery.BatteryStatus = 2`,
+`PowerOnline = True`).
+
+```
+work_score .................. 5,818,877   (21,552/s)
+http_req_failed ............. ✓ rate<0.01    rate=0.00%   (0 of 2,328,528)
+{tier:price} ................ ✓ p(95)<200    p(95)=321.70µs    622x margin
+{tier:stats} ................ ✓ p(95)<500    p(95)=324.33µs   1542x margin
+{tier:risk} ................. ✓ p(95)<1500   p(95)=203.65ms     7.4x margin
+checks_succeeded ............ 100.00%
+effective clock ............. 6.545 -> 6.497 (99.3%, no sag)
+```
+
+**+0.88% over the 5,767,977 reference — do not bank that as the +1–3%.** The
+epoll and lane-batching commits are real work and may well be worth it, but
+this instrument cannot resolve a percent: `HOW-TO-TEST.md` says in as many
+words not to trust the grading script under ~10%. Phase 0's contribution is the
+*reference*, not a demonstrated gain. Treat +0.88% as "consistent with anything
+from zero to a few percent" and use `ab.sh`'s alternated A/B if the landed
+commits ever need a number of their own.
+
+The `{tier:risk}` p95 barely moved (203.65 ms against 203.36 ms), which is what
+a queueing-dominated latency should do when throughput moves by under a
+percent.
 
 ---
 
