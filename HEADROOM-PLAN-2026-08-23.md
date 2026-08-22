@@ -31,7 +31,7 @@ failing a gate costs at most a day.
 | Harness fixes: `RISK_PCT` forwarding, AVX/SSE transition isolation | **Committed on `perf/ryzen-ceiling`** (`69f4f91`), unmerged |
 | Stage 1 (wide block 2) | **Dead**: −23% measured; retraction on both branches |
 | `SCHED_IDLE`/scheduler tuning, `IO_THREADS=1`, x3 batching | **Dead**, closed by measurement |
-| Stage 2 (phase-split block 1) | **Live**, gated on three unmeasured quantities — the subject of this plan |
+| Stage 2 (phase-split block 1) | **Dead**: built as a verified skeleton, measures +6.2% against a +15% floor. See Phase 1 result |
 | Baseline | **5,818,877 cool-state**, 2026-08-23, after both landed perf commits (was 5,767,977 before them — see Phase 0 result) |
 
 ---
@@ -161,6 +161,54 @@ into `docs/` (the Stage 1 write-up is the template) and go to Phase 4.
 
 Probe hygiene for all three: 3+ reps, `--cooldown 60`, in-run ratios rather
 than absolutes, quote the worst rep, never quote an argmax over the plateau.
+
+### Phase 1 result — executed 2026-08-23. Stage 2 is dead.
+
+Full write-up: [`docs/phase-split-negative-result.md`](docs/phase-split-negative-result.md).
+Benches: `obsidio-stage2-probes` (B and C), `obsidio-bench-phase-split` (A).
+Cool box, on AC, worst rep of 7, digests verified against `risk_hash()` before
+any timing.
+
+| Gate | Threshold | Measured | Verdict |
+|---|---|---|---|
+| **B** — memory-sourced `W+K` | ≤ 0.30 ns/rnds2, 4 lanes | **0.2490** (+10.3% over a register operand; +15.2% in the shipped load-per-pair shape) | **PASS** |
+| **C** — schedule co-issue | ≤ 15% at 4 lanes | **+225%** | **FAIL** — but on registers, not ports |
+| **A** — the joint structure | ≤ 0.39 ns/rnds2 | **0.5106** (1.069× risk path, **+6.2% score**) | **FAIL** |
+
+**Gate C's failure is not what it looks like.** `objdump` shows the co-issue arm
+spilling 42 stores and 37 reloads per iteration — four lanes want 2 state
+registers each plus 5 schedule registers each, 28 in a file of 16. Sweeping
+schedule streams against fixed round lanes separates the two effects: one
+stream is nearly free and raises total SHA-unit throughput *above* the
+rounds-only rate, so the issue ports do have slack and Gate C's stated premise
+is confirmed. The cliff is between 13 registers and 18.
+
+**Gate A is the one that decides, and it fails cleanly.** The round phase works:
+0.3058 ns/rnds2 at four lanes against the shipped 0.5456 is **1.78×**. But
+phase-splitting converts the message schedule from work that hides inside
+`sha256rnds2` latency into work that must be paid for — 46% of the group-round
+at four lanes — and 1.78× on the rest does not buy it back.
+
+Two corrections to this plan, recorded because they cost time:
+
+- **The N=2 control was mis-specified.** "It must land near the shipped 0.4878
+  or the skeleton is wrong" fires on the design's own documented behaviour —
+  `phase-split-kernel.md` already said phase-splitting is a regression below ~4
+  lanes. It measured 0.8178 with correct digests. A control has to be a
+  configuration where old and new are *supposed* to agree.
+- **Gate C's arm does not match Stage 2's structure.** Stage 2 phase-splits
+  precisely so N schedules and N chain states are never live together; the gate
+  measures co-issuing them. It should have been written as a port-capacity
+  probe with fixed register pressure.
+
+One branch is left open and is *not* authorised here: software-pipelining the
+two phases, so the schedule for round *r+1* hides inside the round phase for
+*r*. The budget needs ~60% of the schedule to disappear; Probe C says one free
+co-issued stream covers about half. Tight-to-negative, genuinely untested, and
+worth exactly one more probe with a hard gate at 1.17× — never a kernel. §6 of
+the write-up has the arithmetic.
+
+**Phase 2 is not entered. Go to Phase 4.**
 
 ---
 

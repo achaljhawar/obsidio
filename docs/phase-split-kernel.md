@@ -1,5 +1,23 @@
 # The phase-split kernel: the one lead with real score in it
 
+> **CLOSED 2026-08-23. Both stages are now measured and neither pays.**
+> Stage 1 was built and retracted at −23% (see the banner in §
+> "Stage 1 — widen block 2 only" below). Stage 2 was then built as a verified
+> skeleton — the real structure, not a projection — and measures **1.069× on
+> the risk path, +6.2% `work_score`**, against a +15% floor.
+>
+> The mechanism is in [`phase-split-negative-result.md`](phase-split-negative-result.md)
+> and it is short: the round phase does reach **1.78×**, exactly as this
+> document argued, but phase-splitting converts the message schedule from work
+> that hides inside `sha256rnds2` latency into work that has to be paid for. At
+> four lanes the schedule is 46% of the group-round, and 1.78× on the other 54%
+> does not buy it back.
+>
+> What survives: `sha256rnds2` is latency bound (L=4, T=1) and the shipped
+> kernel runs at about half its sustainable rate. That was true, is still true,
+> and is now known not to be convertible by this design. Read the rest as the
+> reasoning that was tried.
+
 Measured on `perf/ryzen-ceiling`, 2026-08-23, AMD Ryzen 7 170 / Docker Desktop
 / WSL2. Everything below rests on `obsidio-rnds2-ports` (3 reps) and
 `obsidio-bench-chain` from that branch.
