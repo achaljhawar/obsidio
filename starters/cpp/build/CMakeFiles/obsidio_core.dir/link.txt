@@ -1,2 +1,0 @@
-/usr/bin/ar qc libobsidio_core.a CMakeFiles/obsidio_core.dir/src/sha256.cpp.o CMakeFiles/obsidio_core.dir/src/risk.cpp.o CMakeFiles/obsidio_core.dir/src/data.cpp.o CMakeFiles/obsidio_core.dir/src/http_server.cpp.o
-/usr/bin/ranlib libobsidio_core.a

@@ -4,3 +4,7 @@ starters/cpp/build*/
 starters/cpp/bench/throttle
 # Serena cache
 .serena/
+
+.DS_Store
+starters/cpp/build*/
+starters/cpp/bench/throttle
