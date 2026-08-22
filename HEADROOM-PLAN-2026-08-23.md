@@ -33,7 +33,7 @@ failing a gate costs at most a day.
 | `SCHED_IDLE`/scheduler tuning, `IO_THREADS=1`, x3 batching | **Dead**, closed by measurement |
 | Stage 2, sequential phase-split | **Dead**: built as a verified skeleton, measures +6.2% against a +15% floor. See Phase 1 result |
 | Stage 2, **pipelined** phase-split | **SHIPPED**: integrated as `chain8`, graded at 6,664,861 (+14.5%). See Phase 2 result |
-| Pipelined kernel, **two streams per block** (probe mode A) | **SHIPPED — final design change**: all four schedules ride the rounds, bench 1.581× vs x2, graded at **`work_score` 7,360,030** — **+26.5%** over the 5,818,877 baseline, risk p95 160.06 ms, 0.00% failures. Design work is closed; what remains is cleanup, docs, and the pitch |
+| Pipelined kernel, **two streams per block** (probe mode A) | **SHIPPED — final design change**: all four schedules ride the rounds, bench 1.581× vs x2, graded at **`work_score` 7,360,030** — **+26.5%** over the 5,818,877 baseline, risk p95 160.06 ms, 0.00% failures. Confirmed by an independent final run at **7,365,605** (+0.08%, clean 4m30.0s clock — which also retires the stretched-clock caveat on the first run), risk p95 159.79 ms. Design work is closed; what remains is cleanup, docs, and the pitch |
 | Baseline | **5,818,877 cool-state**, 2026-08-23, after both landed perf commits (was 5,767,977 before them — see Phase 0 result) |
 
 ---
