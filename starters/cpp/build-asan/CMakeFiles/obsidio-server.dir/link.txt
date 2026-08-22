@@ -1,1 +1,0 @@
-/usr/bin/c++ -std=c++23 -stdlib=libc++ -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names -fsanitize=address,undefined "CMakeFiles/obsidio-server.dir/src/main.cpp.o" "CMakeFiles/obsidio-server.dir/src/risk_pool.cpp.o" -o obsidio-server  libobsidio_core.a /opt/homebrew/Cellar/openssl@3/3.6.2/lib/libcrypto.dylib

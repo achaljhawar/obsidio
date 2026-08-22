@@ -1,1 +1,0 @@
-/usr/bin/c++ -std=c++23 -stdlib=libc++ -O3 -DNDEBUG -fno-plt -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names "CMakeFiles/obsidio-selftest.dir/tests/selftest.cpp.o" -o obsidio-selftest  libobsidio_core.a /opt/homebrew/Cellar/openssl@3/3.6.2/lib/libcrypto.dylib
