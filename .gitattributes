@@ -1,0 +1,13 @@
+# Shell scripts must check out with LF even on Windows.
+#
+# core.autocrlf is true on the Windows development box, which gave every script
+# in starters/cpp/bench/ryzen/ CRLF endings in the working copy. bash then fails
+# on `set -uo pipefail\r` -- and it fails obscurely, because the error names the
+# line but not the reason. Pinning eol=lf here fixes it at checkout for anyone
+# who clones or re-checks-out; run-harness-windows.sh additionally makes an LF
+# copy at run time, which covers a working copy that predates this file.
+*.sh text eol=lf
+
+# Same reasoning for anything else executed inside a Linux container.
+Dockerfile text eol=lf
+*.js text eol=lf

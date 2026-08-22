@@ -2,6 +2,8 @@
 starters/cpp/build*/
 # Local bench binaries
 starters/cpp/bench/throttle
+# LF working copy that run-harness-windows.sh regenerates on every run
+starters/cpp/bench/ryzen/.lf/
 # Serena cache
 .serena/
 # macOS finder metadata
