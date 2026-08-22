@@ -16,6 +16,10 @@ WORKDIR /app
 COPY CMakeLists.txt ./
 COPY src ./src
 COPY tests ./tests
+# The x86 measurement binaries build alongside the server so they are always
+# available from the build stage, and so they cannot silently rot: a benchmark
+# that stops compiling is a benchmark nobody runs.
+COPY bench ./bench
 
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build -j"$(nproc)"

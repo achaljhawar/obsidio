@@ -89,6 +89,27 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_dependencies(obsidio-http-test obsidio-server)
 endif()
 
+# x86 measurement binaries. Not part of the server and not run by the image;
+# they exist to answer two questions on the grading CPU: whether SHA256RNDS2 is
+# latency or port bound (which decides whether a wider kernel is worth
+# building), and what the shipped kernel actually achieves per lane.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64"
+   AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/bench/x86/rnds2_ports.cpp")
+  add_executable(obsidio-rnds2-ports bench/x86/rnds2_ports.cpp)
+  target_compile_options(obsidio-rnds2-ports PRIVATE -O2 -msha -mssse3 -msse4.1 -mavx2)
+
+  add_executable(obsidio-bench-chain bench/x86/bench_chain_x86.cpp)
+  target_link_libraries(obsidio-bench-chain PRIVATE obsidio_core)
+  target_compile_options(obsidio-bench-chain PRIVATE -O2)
+
+  # Isolates the AVX/SSE transition penalty from genuine port contention. See
+  # the comment at the top of the file: rnds2_ports.cpp's co-issue arm reports
+  # ~-98% and reads it as saturated issue ports, but the same experiment with
+  # 128-bit co-issue costs nothing at all.
+  add_executable(obsidio-avx-transition bench/x86/avx_transition.cpp)
+  target_compile_options(obsidio-avx-transition PRIVATE -O2 -msha -mssse3 -msse4.1 -mavx2)
+endif()
+
 enable_testing()
 add_test(NAME selftest COMMAND obsidio-selftest)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
