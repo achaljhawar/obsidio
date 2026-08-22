@@ -270,9 +270,11 @@ Before treating the service as production-ready:
 1. Make the memory update and durable append one ordered operation, and return
    errors when persistence fails.
 2. Add overload, shutdown, persistence-failure, and concurrency tests.
-3. Extend CI to native architecture coverage where accelerated instructions are
-   expected to execute (the current runners are x86-64 without SHA-NI exposed,
-   so the accelerated back ends are compiled but not executed there).
+3. Confirm what the CI runners actually expose. The image build runs
+   `RISK_BACKEND=x86-sha-ni` as a gate, which SKIPs when the CPU lacks SHA-NI
+   and fails the build when it has it and verification fails -- so whether CI
+   is a real x86 correctness gate depends on the runner's CPU. Read the
+   selftest output in the build log to find out; do not assume either way.
 
 Closed by `fix/http-input-hardening`:
 
