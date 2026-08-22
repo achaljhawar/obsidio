@@ -1,5 +1,6 @@
 #include "sha256.hpp"
 
+#include <cstdint>
 #include <cstring>
 
 #if defined(OBSIDIO_USE_OPENSSL)

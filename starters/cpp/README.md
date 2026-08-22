@@ -267,13 +267,24 @@ evidence trail.
 
 Before treating the service as production-ready:
 
-1. Parse `Content-Length` strictly and cap request bodies.
-2. Reject non-finite prices before updating state or rendering JSON.
-3. Make the memory update and durable append one ordered operation, and return
+1. Make the memory update and durable append one ordered operation, and return
    errors when persistence fails.
-4. Add HTTP, overload, shutdown, persistence-failure, and concurrency tests.
-5. Run the full matrix in CI on Linux, with native architecture coverage where
-   accelerated instructions are expected to execute.
+2. Add overload, shutdown, persistence-failure, and concurrency tests.
+3. Confirm what the CI runners actually expose. The image build runs
+   `RISK_BACKEND=x86-sha-ni` as a gate, which SKIPs when the CPU lacks SHA-NI
+   and fails the build when it has it and verification fails -- so whether CI
+   is a real x86 correctness gate depends on the runner's CPU. Read the
+   selftest output in the build log to find out; do not assume either way.
+
+Closed by `fix/http-input-hardening`:
+
+- `Content-Length` is parsed strictly and bodies are capped; see
+  `tests/http_test.cpp` for the socket-level cases, which run as a Docker build
+  gate and under CTest.
+- Non-finite prices are rejected at the HTTP edge and again in `update_price`,
+  which is the choke point the persistence replay also goes through.
+- HTTP parsing and backpressure now have regression coverage; CI runs the image
+  build, native CTest, and an ASan+UBSan pass.
 
 These gaps do not invalidate the measured hash-kernel work, but they do define
 the next engineering phase.

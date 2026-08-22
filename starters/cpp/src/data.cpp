@@ -66,6 +66,12 @@ Symbol* find_symbol(std::string_view name) {
 }
 
 bool update_price(std::string_view name, double price) {
+  // Non-finite prices are rejected at the last shared choke point rather than
+  // only at the HTTP edge, because persist_init()'s replay reaches here too --
+  // and its fscanf("%lf") parses "nan"/"inf" out of a torn or hand-edited log.
+  // A NaN stored here renders as bare `nan` in the cached price JSON, which is
+  // invalid JSON, and poisons every later /price and /stats for that symbol.
+  if (!std::isfinite(price)) return false;
   Symbol* sym = find_symbol(name);
   if (sym == nullptr) return false;
   std::unique_lock lock(g_price_mutex);

@@ -4,7 +4,5 @@ starters/cpp/build*/
 starters/cpp/bench/throttle
 # Serena cache
 .serena/
-
+# macOS finder metadata
 .DS_Store
-starters/cpp/build*/
-starters/cpp/bench/throttle

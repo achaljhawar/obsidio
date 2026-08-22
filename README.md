@@ -161,15 +161,20 @@ CPU model, virtualization, power policy, and thermal state.
 
 These are current engineering issues, not historical findings:
 
-- The HTTP parser trusts an unchecked `Content-Length`; an extreme value can
-  overflow size arithmetic and terminate the process. A body-size limit and
-  strict integer parsing are still required.
-- `POST /price` accepts non-finite floating-point values, which can produce
-  invalid JSON such as `inf`.
 - The in-memory price is updated before the persistence append, append/sync
   failures are not surfaced, and concurrent updates are not ordered as one
   transaction. The current log is useful groundwork, not a completed durability
   guarantee.
+
+Resolved, with regression coverage in `starters/cpp/tests/http_test.cpp`:
+
+- `Content-Length` is parsed strictly with a saturating accumulator that cannot
+  overflow; header and body sizes are capped (16 KiB / 64 KiB), conflicting
+  duplicates are rejected, and malformed requests get 400/413/431 rather than a
+  silent disconnect.
+- `POST /price` rejects NaN, Infinity, and malformed numbers, so the cached
+  price JSON can no longer contain `nan`. `update_price` enforces the same rule,
+  which also covers the persistence replay path.
 - `k6/grading.js` increments `work_score` for HTTP 200 responses; it does not
   independently validate response bodies or enforce a per-request latency test
   before awarding work.
