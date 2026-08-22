@@ -142,7 +142,18 @@ and candidate agree on the same wrong digest.
 | `RISK_QUEUE` | `512` | Maximum queued risk jobs |
 | `RISK_DEADLINE_MS` | `0` | Queue-age rejection threshold; `0` disables it |
 | `RISK_BACKEND` | automatic | Backend override used for verification and experiments |
+| `RISK_X86_KERNEL` | `baseline` | x86 SHA-NI kernel variant: `baseline` or `hoisted` |
 | `PRICE_LOG` | `/data/prices.log` | Append-only persistence log path |
+| `OBSIDIO_SNDBUF` | unset | Test-only `SO_SNDBUF` pin; see `tests/http_test.cpp` |
+
+`RISK_X86_KERNEL` selects between two instantiations of the same x86 kernel
+that differ only in whether block 2's upper-half round constants are
+recomputed per hash or read from a precomputed table. Both are verified
+independently at boot and pinned to the same goldens by the self-test, so the
+choice cannot affect a digest — only a cycle count. It defaults to `baseline`,
+the variant measured end to end on x86 hardware; `hoisted` stays opt-in until
+it clears the win threshold on the grading CPU. Compare them with
+`bench/ryzen/ab.sh`.
 
 Thread counts are explicit because a container limited to two CPUs can still
 see every host CPU. Sizing from `std::thread::hardware_concurrency()` would

@@ -47,8 +47,39 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
   # Same rule as the ARM back end: SHA-NI instructions are confined to one
   # translation unit, entered only after __builtin_cpu_supports("sha") says
   # yes, so the binary still starts on any x86-64 CPU.
+  set(OBSIDIO_X86_FLAGS -msha -mssse3 -msse4.1)
+
+  # Scheduling tuned for the grading CPU, scoped to this one file.
+  #
+  # -mtune is safe in a way -march is NOT: it changes instruction *scheduling*
+  # and cost models only, never which instructions are emitted. The binary
+  # still runs on any x86-64 CPU, and the build stays reproducible because the
+  # target is named explicitly rather than sniffed from the build host. That is
+  # why -march=native remains banned above while this is allowed here.
+  #
+  # Set OBSIDIO_X86_TUNE to match the grading silicon (znver3 for Zen 3 /
+  # Zen 3+ such as the 6800HS, znver4 for Zen 4, znver5 for Zen 5); "generic"
+  # disables it. Unsupported values fall back to generic with a warning rather
+  # than failing the build, so an older pinned compiler still works.
+  set(OBSIDIO_X86_TUNE "znver3" CACHE STRING
+      "-mtune target for src/chain_x86.cpp only (or 'generic' to disable)")
+  if(NOT OBSIDIO_X86_TUNE STREQUAL "generic")
+    include(CheckCXXCompilerFlag)
+    set(CMAKE_REQUIRED_FLAGS "-mtune=${OBSIDIO_X86_TUNE}")
+    check_cxx_compiler_flag("" OBSIDIO_TUNE_SUPPORTED)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(OBSIDIO_TUNE_SUPPORTED)
+      list(APPEND OBSIDIO_X86_FLAGS "-mtune=${OBSIDIO_X86_TUNE}")
+      message(STATUS "risk chain: x86 kernel tuned for ${OBSIDIO_X86_TUNE}"
+                     " (scheduling only -- ISA unchanged)")
+    else()
+      message(WARNING "risk chain: -mtune=${OBSIDIO_X86_TUNE} not supported by"
+                      " this compiler; using generic scheduling")
+    endif()
+  endif()
+
   set_source_files_properties(src/chain_x86.cpp PROPERTIES
-    COMPILE_OPTIONS "-msha;-mssse3;-msse4.1")
+    COMPILE_OPTIONS "${OBSIDIO_X86_FLAGS}")
   message(STATUS "risk chain: x86 SHA-NI back end compiled in (runtime-gated)")
 else()
   message(STATUS "risk chain: no accelerated back end for ${CMAKE_SYSTEM_PROCESSOR}"

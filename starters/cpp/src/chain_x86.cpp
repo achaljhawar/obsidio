@@ -34,6 +34,7 @@
 #include <immintrin.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 
 #include "sha256.hpp"
@@ -73,6 +74,18 @@ __m128i KV[16];
 // means block 2 needs zero sha256msg1/msg2 calls, only rnds2.
 __m128i KW2V[16];
 
+// The upper half of each KW2V entry, pre-shuffled. sha256rnds2 consumes two
+// rounds per instruction from the low quadword, so the second call of each
+// pair needs _mm_shuffle_epi32(k, 0x0E). For block 2 that shuffle is a pure
+// function of a constant, yet the baseline kernel recomputes it 16 times per
+// hash. Hoisting it is exact -- same value, fewer instructions.
+//
+// Whether fewer instructions means faster is a measurement, not a deduction:
+// the shuffle sits off the rnds2 dependency chain, so a latency-bound kernel
+// may not notice it at all, while a port-bound one should. That is precisely
+// why this is a selectable variant rather than an assumed win.
+__m128i KW2V_HI[16];
+
 void init_constants() {
   for (int i = 0; i < 16; ++i) {
     KV[i] = _mm_setr_epi32(static_cast<int>(K[4 * i]),
@@ -96,6 +109,7 @@ void init_constants() {
                              static_cast<int>(K[4 * i + 1] + w[4 * i + 1]),
                              static_cast<int>(K[4 * i + 2] + w[4 * i + 2]),
                              static_cast<int>(K[4 * i + 3] + w[4 * i + 3]));
+    KW2V_HI[i] = _mm_shuffle_epi32(KW2V[i], 0x0E);
   }
 }
 
@@ -250,14 +264,14 @@ inline void compress_generic(State& S, const std::uint8_t block[64]) {
 // Block 2: every message word is a compile-time constant, so this is 16
 // rnds2 pairs against the precomputed KW2V table and nothing else -- no
 // message load, no byte swap, no msg1/msg2.
+template <bool kHoistHi>
 inline void compress_const_block2(State& S) {
   __m128i state0 = S.abef, state1 = S.cdgh;
-  __m128i msg;
   for (int i = 0; i < 16; ++i) {
-    msg = KW2V[i];
-    state1 = _mm_sha256rnds2_epu32(state1, state0, msg);
-    msg = _mm_shuffle_epi32(msg, 0x0E);
-    state0 = _mm_sha256rnds2_epu32(state0, state1, msg);
+    const __m128i lo = KW2V[i];
+    state1 = _mm_sha256rnds2_epu32(state1, state0, lo);
+    const __m128i hi = kHoistHi ? KW2V_HI[i] : _mm_shuffle_epi32(lo, 0x0E);
+    state0 = _mm_sha256rnds2_epu32(state0, state1, hi);
   }
   S.abef = _mm_add_epi32(state0, S.abef);
   S.cdgh = _mm_add_epi32(state1, S.cdgh);
@@ -280,15 +294,17 @@ inline void finish_digest(const State& S, std::uint8_t digest[32]) {
 // One full 64-byte-message hash: block 1 (real) + block 2 (constant). Writes
 // straight into `out` -- no std::string, no heap traffic, since this runs
 // 50,000 times per request.
+template <bool kHoistHi>
 inline void hash64(const char in[64], char out[64]) {
   State s{kInitABEF, kInitCDGH};
   compress_generic(s, reinterpret_cast<const std::uint8_t*>(in));
-  compress_const_block2(s);
+  compress_const_block2<kHoistHi>(s);
   std::uint8_t digest[32];
   finish_digest(s, digest);
   hex_encode(digest, kSha256DigestBytes, out);
 }
 
+template <bool kHoistHi>
 void chain1_impl(const char in[64], int rounds, char out[64]) {
   if (rounds <= 0) {
     std::memcpy(out, in, 64);
@@ -297,7 +313,7 @@ void chain1_impl(const char in[64], int rounds, char out[64]) {
   char state[64];
   std::memcpy(state, in, 64);
   for (int r = 0; r < rounds; ++r) {
-    hash64(state, state);
+    hash64<kHoistHi>(state, state);
   }
   std::memcpy(out, state, 64);
 }
@@ -499,6 +515,7 @@ inline void compress2(State& SA, Msg& A, State& SB, Msg& B) {
 // Both lanes' constant second block: the same KW2V entry feeds both rnds2
 // chains, so this is 64 interleaved rounds with zero schedule work and only
 // one constant load per four rounds.
+template <bool kHoistHi>
 inline void compress2_const(State& SA, State& SB) {
   __m128i a0 = SA.abef, a1 = SA.cdgh;
   __m128i b0 = SB.abef, b1 = SB.cdgh;
@@ -506,7 +523,7 @@ inline void compress2_const(State& SA, State& SB) {
     const __m128i k = KW2V[i];
     a1 = _mm_sha256rnds2_epu32(a1, a0, k);
     b1 = _mm_sha256rnds2_epu32(b1, b0, k);
-    const __m128i ks = _mm_shuffle_epi32(k, 0x0E);
+    const __m128i ks = kHoistHi ? KW2V_HI[i] : _mm_shuffle_epi32(k, 0x0E);
     a0 = _mm_sha256rnds2_epu32(a0, a1, ks);
     b0 = _mm_sha256rnds2_epu32(b0, b1, ks);
   }
@@ -516,6 +533,7 @@ inline void compress2_const(State& SA, State& SB) {
   SB.cdgh = _mm_add_epi32(b1, SB.cdgh);
 }
 
+template <bool kHoistHi>
 void chain2_impl(const char in_a[64], const char in_b[64], int rounds,
                  char out_a[64], char out_b[64]) {
   if (rounds <= 0) {
@@ -529,7 +547,7 @@ void chain2_impl(const char in_a[64], const char in_b[64], int rounds,
     State sa{kInitABEF, kInitCDGH};
     State sb{kInitABEF, kInitCDGH};
     compress2(sa, ma, sb, mb);
-    compress2_const(sa, sb);
+    compress2_const<kHoistHi>(sa, sb);
     const Hex ha = state_to_hex(sa);
     const Hex hb = state_to_hex(sb);
     if (++r == rounds) {
@@ -544,24 +562,48 @@ void chain2_impl(const char in_a[64], const char in_b[64], int rounds,
 
 // A pair plus a single: two register-resident lanes is the XMM ceiling, so
 // the third chain runs after the pair rather than spilling all three.
+template <bool kHoistHi>
 void chain3_impl(const char in_a[64], const char in_b[64], const char in_c[64],
                  int rounds, char out_a[64], char out_b[64], char out_c[64]) {
-  chain2_impl(in_a, in_b, rounds, out_a, out_b);
-  chain1_impl(in_c, rounds, out_c);
+  chain2_impl<kHoistHi>(in_a, in_b, rounds, out_a, out_b);
+  chain1_impl<kHoistHi>(in_c, rounds, out_c);
 }
 
 // Two pairs: per-chain rate identical to chain2's, so the four-deep batches
 // the pool prefers under load lose nothing to register pressure.
+template <bool kHoistHi>
 void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
                  const char in_d[64], int rounds, char out_a[64],
                  char out_b[64], char out_c[64], char out_d[64]) {
-  chain2_impl(in_a, in_b, rounds, out_a, out_b);
-  chain2_impl(in_c, in_d, rounds, out_c, out_d);
+  chain2_impl<kHoistHi>(in_a, in_b, rounds, out_a, out_b);
+  chain2_impl<kHoistHi>(in_c, in_d, rounds, out_c, out_d);
 }
 
-const Backend kX86Backend = {"x86-sha-ni (register-resident x2; x3/x4 as pairs)",
-                             chain1_impl, chain2_impl, chain3_impl,
-                             chain4_impl};
+// Two instantiations of the identical kernel, differing only in whether the
+// block-2 upper-half constants are recomputed or read from KW2V_HI. Both are
+// verified independently at boot by risk.cpp, and the self-test pins both to
+// the same goldens, so picking between them can never affect a digest -- only
+// a cycle count.
+const Backend kX86Baseline = {
+    "x86-sha-ni (register-resident x2; x3/x4 as pairs)",
+    chain1_impl<false>, chain2_impl<false>, chain3_impl<false>,
+    chain4_impl<false>};
+
+const Backend kX86Hoisted = {
+    "x86-sha-ni (register-resident x2, hoisted block-2 constants)",
+    chain1_impl<true>, chain2_impl<true>, chain3_impl<true>, chain4_impl<true>};
+
+// Which kernel serves. Defaults to the variant that has actually been measured
+// end to end on x86 hardware; the tuned one stays opt-in until it clears the
+// win threshold on the grading CPU, because an unmeasured "optimisation" that
+// ships by default is just an unreviewed change.
+//   RISK_X86_KERNEL=baseline   (default)
+//   RISK_X86_KERNEL=hoisted
+const Backend* select_kernel() {
+  const char* raw = std::getenv("RISK_X86_KERNEL");
+  if (raw != nullptr && std::strcmp(raw, "hoisted") == 0) return &kX86Hoisted;
+  return &kX86Baseline;
+}
 
 bool cpu_has_sha_ni() {
   __builtin_cpu_init();
@@ -577,7 +619,7 @@ const Init g_init;
 }  // namespace
 
 const Backend* x86_sha_backend() {
-  return cpu_has_sha_ni() ? &kX86Backend : nullptr;
+  return cpu_has_sha_ni() ? select_kernel() : nullptr;
 }
 
 }  // namespace chain
