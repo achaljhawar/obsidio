@@ -71,8 +71,20 @@ if(OBSIDIO_SANITIZE)
   # Run the k6 script against a sanitised build at least once. ASan/UBSan turn
   # silent memory corruption into a loud stack trace, which is the whole reason
   # C++ is survivable here. Never ship this build -- it is ~2x slower.
-  target_compile_options(obsidio_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer -g)
-  target_link_options(obsidio_core PUBLIC -fsanitize=address,undefined)
+  #
+  # -no-pie is load-bearing, not an optimisation. GCC 12's ASan runtime
+  # predates kernels that default vm.mmap_rnd_bits to 32: under full 32-bit
+  # mmap entropy the randomized PIE base can land inside ASan's fixed shadow
+  # region, and the process dies before main() in an
+  # AddressSanitizer:DEADLYSIGNAL loop with no report. Measured here (WSL2,
+  # rnd_bits=32): 5/10 server starts crashed on one tree, 1/10 on a smaller
+  # binary, 0/10 with randomization off -- the environment, not the code, and
+  # it masquerades as "introduced" by whatever change grew the binary last.
+  # setarch -R would also fix it but the personality() syscall is blocked by
+  # Docker's default seccomp profile, so pinning the executable base is the
+  # fix that works everywhere this build runs. Release builds stay PIE.
+  target_compile_options(obsidio_core PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer -g -fno-pie)
+  target_link_options(obsidio_core PUBLIC -fsanitize=address,undefined -no-pie)
 endif()
 
 add_executable(obsidio-server src/main.cpp src/risk_pool.cpp)
