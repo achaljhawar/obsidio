@@ -60,8 +60,10 @@ bool RiskPool::submit(RiskJob job) {
   return true;
 }
 
+void RiskPool::request_stop() { stopping_.store(true, std::memory_order_relaxed); }
+
 void RiskPool::stop() {
-  if (stopping_.exchange(true)) return;
+  request_stop();
   cv_.notify_all();
   for (auto& t : workers_) {
     if (t.joinable()) t.join();
@@ -74,35 +76,77 @@ std::size_t RiskPool::queue_depth() const {
   return queue_.size();
 }
 
+bool RiskPool::expired(const RiskJob& job) const {
+  if (deadline_.count() <= 0) return false;
+  return (std::chrono::steady_clock::now() - job.queued_at) > deadline_;
+}
+
 void RiskPool::worker_loop() {
   deprioritise_current_thread();
 
   for (;;) {
-    RiskJob job;
+    // Take up to FOUR jobs when four are queued. A single chain is
+    // latency-bound, so extra independent chains interleaved in the same loop
+    // ride along in the pipeline bubbles: three cost ~37% more time than one
+    // and produce that many answers. This is instruction-level parallelism
+    // inside one thread, NOT extra threads -- the worker count is unchanged and
+    // the 2-CPU cap is untouched. Under the graded load the queue sits deep at
+    // peak, so full batches are essentially always available; the shorter paths
+    // are what run during ramp-up and cool-down.
+    RiskJob jobs[4];
+    int taken = 0;
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      cv_.wait(lock, [this] {
-        return stopping_.load(std::memory_order_relaxed) || !queue_.empty();
-      });
+      // Timed wait rather than cv_.wait: request_stop() is a bare atomic store
+      // (it must be async-signal-safe, so it cannot notify), and this bounds
+      // shutdown latency to the wait interval without one.
+      while (!stopping_.load(std::memory_order_relaxed) && queue_.empty()) {
+        cv_.wait_for(lock, std::chrono::milliseconds(100));
+      }
       if (queue_.empty()) return;  // stopping and drained
-      job = std::move(queue_.front());
-      queue_.pop_front();
+      while (taken < 4 && !queue_.empty()) {
+        jobs[taken++] = std::move(queue_.front());
+        queue_.pop_front();
+      }
     }
 
     // A request that has already blown its latency budget scores nothing even
     // if we finish it, and finishing it steals CPU from requests that could
     // still land in time. Shedding it is only worth doing if you can afford the
     // error against the 1% ceiling -- hence disabled by default (deadline 0).
-    if (deadline_.count() > 0) {
-      const auto waited = std::chrono::steady_clock::now() - job.queued_at;
-      if (waited > deadline_) {
-        on_dropped_(job);
+    int live = 0;
+    for (int i = 0; i < taken; ++i) {
+      if (expired(jobs[i])) {
+        on_dropped_(jobs[i]);
         continue;
       }
+      if (live != i) jobs[live] = std::move(jobs[i]);
+      ++live;
     }
 
-    const std::string digest = risk_hash(job.seed);
-    on_done_(job, digest);
+    if (live == 4) {
+      std::string digest_a, digest_b, digest_c, digest_d;
+      risk_hash_x4(jobs[0].seed, jobs[1].seed, jobs[2].seed, jobs[3].seed,
+                   digest_a, digest_b, digest_c, digest_d);
+      on_done_(jobs[0], digest_a);
+      on_done_(jobs[1], digest_b);
+      on_done_(jobs[2], digest_c);
+      on_done_(jobs[3], digest_d);
+    } else if (live == 3) {
+      std::string digest_a, digest_b, digest_c;
+      risk_hash_x3(jobs[0].seed, jobs[1].seed, jobs[2].seed, digest_a, digest_b,
+                   digest_c);
+      on_done_(jobs[0], digest_a);
+      on_done_(jobs[1], digest_b);
+      on_done_(jobs[2], digest_c);
+    } else if (live == 2) {
+      std::string digest_a, digest_b;
+      risk_hash_x2(jobs[0].seed, jobs[1].seed, digest_a, digest_b);
+      on_done_(jobs[0], digest_a);
+      on_done_(jobs[1], digest_b);
+    } else if (live == 1) {
+      on_done_(jobs[0], risk_hash(jobs[0].seed));
+    }
   }
 }
 

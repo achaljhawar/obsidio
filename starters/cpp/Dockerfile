@@ -21,7 +21,14 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
     && cmake --build build -j"$(nproc)"
 
 # Correctness gate. FIPS vectors plus the full 50,000-round chain.
-RUN ./build/obsidio-selftest
+#
+# Run TWICE. The first pass exercises whatever accelerated back end this build
+# host offers; the second forces the serving fallback (chain_fallback ->
+# sha256_64) against the same golden digests. Without the second pass the
+# fallback -- the only path an x86 or crypto-less grading box would ever run --
+# ships untested.
+RUN ./build/obsidio-selftest \
+    && RISK_BACKEND=reference ./build/obsidio-selftest
 
 FROM debian:bookworm-20240926-slim
 

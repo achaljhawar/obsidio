@@ -1,0 +1,6 @@
+/Users/prathamnayak/obsidio/starters/cpp/build-asan/CMakeFiles/obsidio_core.dir
+/Users/prathamnayak/obsidio/starters/cpp/build-asan/CMakeFiles/obsidio-server.dir
+/Users/prathamnayak/obsidio/starters/cpp/build-asan/CMakeFiles/obsidio-selftest.dir
+/Users/prathamnayak/obsidio/starters/cpp/build-asan/CMakeFiles/test.dir
+/Users/prathamnayak/obsidio/starters/cpp/build-asan/CMakeFiles/edit_cache.dir
+/Users/prathamnayak/obsidio/starters/cpp/build-asan/CMakeFiles/rebuild_cache.dir

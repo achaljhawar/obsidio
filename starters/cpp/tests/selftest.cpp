@@ -8,6 +8,7 @@
 // Golden values generated with Python's hashlib; cross-check any of them with:
 //   python3 -c "import hashlib;h='0.5';[h:=hashlib.sha256(h.encode()).hexdigest() for _ in range(50000)];print(h)"
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "../src/risk.hpp"
@@ -37,6 +38,14 @@ std::string sha256_hex(const std::string& input) {
   return std::string(hex, obsidio::kSha256HexBytes);
 }
 
+std::string sha256_64_hex(const std::string& input) {
+  std::uint8_t digest[obsidio::kSha256DigestBytes];
+  obsidio::sha256_64(reinterpret_cast<const std::uint8_t*>(input.data()), digest);
+  char hex[obsidio::kSha256HexBytes];
+  obsidio::hex_encode(digest, obsidio::kSha256DigestBytes, hex);
+  return std::string(hex, obsidio::kSha256HexBytes);
+}
+
 }  // namespace
 
 int main() {
@@ -54,6 +63,35 @@ int main() {
   expect_eq("64-byte input (two-block boundary)",
             sha256_hex(std::string(64, 'a')),
             "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb");
+
+  // sha256_64 is the specialised two-block path the reference chain runs on
+  // every round after the first. It must be byte-identical to the generic one
+  // for every 64-byte input, or the digest silently diverges and every /risk
+  // request served from the fallback scores zero.
+  //
+  // This is what lets chain_fallback() use it while chain_reference() -- the
+  // oracle that validates the accelerated back ends -- stays on the generic
+  // primitive. The two chains differ by exactly this substitution, so pinning
+  // the primitive pins the chain.
+  std::printf("\nSpecialised 64-byte path (sha256_64 == sha256)\n");
+  expect_eq("64 x 'a'", sha256_64_hex(std::string(64, 'a')),
+            sha256_hex(std::string(64, 'a')));
+  expect_eq("64 x 0x00", sha256_64_hex(std::string(64, '\0')),
+            sha256_hex(std::string(64, '\0')));
+  expect_eq("64 x 0xff", sha256_64_hex(std::string(64, '\xff')),
+            sha256_hex(std::string(64, '\xff')));
+  {
+    // A byte sweep across the block, and a real chain value.
+    std::string mixed(64, '\0');
+    for (int i = 0; i < 64; ++i) mixed[i] = static_cast<char>(i * 4 + 1);
+    expect_eq("byte sweep", sha256_64_hex(mixed), sha256_hex(mixed));
+    const std::string chained = sha256_hex("0.5");
+    expect_eq("live chain value", sha256_64_hex(chained), sha256_hex(chained));
+    // Every hex character, since that is all the chain ever feeds it.
+    std::string hexish(64, '0');
+    for (int i = 0; i < 64; ++i) hexish[i] = "0123456789abcdef"[i % 16];
+    expect_eq("hex alphabet", sha256_64_hex(hexish), sha256_hex(hexish));
+  }
 
   std::printf("\nRisk chain, short runs\n");
   expect_eq("seed=0.5    n=1", obsidio::risk_hash("0.5", 1),
@@ -73,6 +111,171 @@ int main() {
             "8dc4014994d6d0df04656cb1d5988562af06015babd9592bf37451173c451148");
   expect_eq("seed=none", obsidio::risk_hash("none"),
             "5b83a4893dc72cfd45dabf4fae920510e38954cafa2481efce3f7815d09bc460");
+
+  // -------------------------------------------------------------------------
+  // The paired path the risk pool actually runs at peak. Two chains sharing one
+  // thread is exactly where a lane-crossing bug lives, and such a bug produces
+  // two perfectly plausible 64-char hex strings, so it has to be checked
+  // against the same goldens as the single path.
+  std::printf("\nRisk chain, x2 interleaved (what the pool runs at peak)\n");
+  {
+    std::string a, b;
+
+    obsidio::risk_hash_x2("0.5", "none", a, b);
+    expect_eq("x2 lane A  seed=0.5", a,
+              "8dc4014994d6d0df04656cb1d5988562af06015babd9592bf37451173c451148");
+    expect_eq("x2 lane B  seed=none", b,
+              "5b83a4893dc72cfd45dabf4fae920510e38954cafa2481efce3f7815d09bc460");
+
+    // Swapped, to catch a back end that silently returns lane A twice.
+    obsidio::risk_hash_x2("none", "0.5", a, b);
+    expect_eq("x2 swapped A  seed=none", a,
+              "5b83a4893dc72cfd45dabf4fae920510e38954cafa2481efce3f7815d09bc460");
+    expect_eq("x2 swapped B  seed=0.5", b,
+              "8dc4014994d6d0df04656cb1d5988562af06015babd9592bf37451173c451148");
+
+    // Identical seeds must give identical digests, short chains must match the
+    // single-chain path, and n=1 exercises the zero-rounds edge.
+    obsidio::risk_hash_x2("0.5", "0.5", a, b);
+    expect_eq("x2 same seed both lanes", a, b);
+    obsidio::risk_hash_x2("0.5", "0.4821", a, b, 10);
+    expect_eq("x2 n=10 lane A", a, obsidio::risk_hash("0.5", 10));
+    expect_eq("x2 n=10 lane B", b, obsidio::risk_hash("0.4821", 10));
+    obsidio::risk_hash_x2("0.5", "none", a, b, 1);
+    expect_eq("x2 n=1 lane A", a, obsidio::risk_hash("0.5", 1));
+    expect_eq("x2 n=1 lane B", b, obsidio::risk_hash("none", 1));
+  }
+
+  std::printf("\nRisk chain, x3 interleaved (what the pool runs at peak)\n");
+  {
+    const std::string kSeed05 = obsidio::risk_hash("0.5");
+    const std::string kSeedNone = obsidio::risk_hash("none");
+    std::string a, b, c;
+
+    obsidio::risk_hash_x3("0.5", "none", "0.4821", a, b, c);
+    expect_eq("x3 lane A  seed=0.5", a, kSeed05);
+    expect_eq("x3 lane B  seed=none", b, kSeedNone);
+    expect_eq("x3 lane C  seed=0.4821", c, obsidio::risk_hash("0.4821"));
+
+    // Rotate the seeds: a lane that quietly reads its neighbour's state passes
+    // one ordering and fails another.
+    obsidio::risk_hash_x3("0.4821", "0.5", "none", a, b, c);
+    expect_eq("x3 rotated A  seed=0.4821", a, obsidio::risk_hash("0.4821"));
+    expect_eq("x3 rotated B  seed=0.5", b, kSeed05);
+    expect_eq("x3 rotated C  seed=none", c, kSeedNone);
+
+    obsidio::risk_hash_x3("0.5", "0.5", "0.5", a, b, c);
+    expect_eq("x3 same seed all lanes A==B", a, b);
+    expect_eq("x3 same seed all lanes B==C", b, c);
+
+    // x3 must agree with x2 and x1 on the lanes they share, or the pool serves
+    // different digests depending on how deep the queue happened to be.
+    std::string xa, xb;
+    obsidio::risk_hash_x2("0.5", "none", xa, xb);
+    obsidio::risk_hash_x3("0.5", "none", "0.4821", a, b, c);
+    expect_eq("x3 agrees with x2 lane A", a, xa);
+    expect_eq("x3 agrees with x2 lane B", b, xb);
+
+    obsidio::risk_hash_x3("0.5", "0.4821", "none", a, b, c, 10);
+    expect_eq("x3 n=10 lane A", a, obsidio::risk_hash("0.5", 10));
+    expect_eq("x3 n=10 lane B", b, obsidio::risk_hash("0.4821", 10));
+    expect_eq("x3 n=10 lane C", c, obsidio::risk_hash("none", 10));
+    obsidio::risk_hash_x3("0.5", "none", "0.4821", a, b, c, 1);
+    expect_eq("x3 n=1 lane A", a, obsidio::risk_hash("0.5", 1));
+    expect_eq("x3 n=1 lane B", b, obsidio::risk_hash("none", 1));
+    expect_eq("x3 n=1 lane C", c, obsidio::risk_hash("0.4821", 1));
+  }
+
+  std::printf("\nRisk chain, x4 interleaved (what the pool runs at peak)\n");
+  {
+    const std::string kSeed05 = obsidio::risk_hash("0.5");
+    const std::string kSeedNone = obsidio::risk_hash("none");
+    const std::string kSeed4821 = obsidio::risk_hash("0.4821");
+    const std::string kSeedPi = obsidio::risk_hash("0.31415");
+    std::string a, b, c, d;
+
+    obsidio::risk_hash_x4("0.5", "none", "0.4821", "0.31415", a, b, c, d);
+    expect_eq("x4 lane A  seed=0.5", a, kSeed05);
+    expect_eq("x4 lane B  seed=none", b, kSeedNone);
+    expect_eq("x4 lane C  seed=0.4821", c, kSeed4821);
+    expect_eq("x4 lane D  seed=0.31415", d, kSeedPi);
+
+    obsidio::risk_hash_x4("0.31415", "0.4821", "none", "0.5", a, b, c, d);
+    expect_eq("x4 rotated A  seed=0.31415", a, kSeedPi);
+    expect_eq("x4 rotated B  seed=0.4821", b, kSeed4821);
+    expect_eq("x4 rotated C  seed=none", c, kSeedNone);
+    expect_eq("x4 rotated D  seed=0.5", d, kSeed05);
+
+    obsidio::risk_hash_x4("0.5", "0.5", "0.5", "0.5", a, b, c, d);
+    expect_eq("x4 same seed all lanes A==B", a, b);
+    expect_eq("x4 same seed all lanes B==C", b, c);
+    expect_eq("x4 same seed all lanes C==D", c, d);
+
+    // Every batch size must agree, or the digest depends on queue depth.
+    std::string ya, yb, yc;
+    obsidio::risk_hash_x3("0.5", "none", "0.4821", ya, yb, yc);
+    obsidio::risk_hash_x4("0.5", "none", "0.4821", "0.31415", a, b, c, d);
+    expect_eq("x4 agrees with x3 lane A", a, ya);
+    expect_eq("x4 agrees with x3 lane B", b, yb);
+    expect_eq("x4 agrees with x3 lane C", c, yc);
+
+    obsidio::risk_hash_x4("0.5", "0.4821", "none", "0.31415", a, b, c, d, 10);
+    expect_eq("x4 n=10 lane A", a, obsidio::risk_hash("0.5", 10));
+    expect_eq("x4 n=10 lane B", b, obsidio::risk_hash("0.4821", 10));
+    expect_eq("x4 n=10 lane C", c, obsidio::risk_hash("none", 10));
+    expect_eq("x4 n=10 lane D", d, obsidio::risk_hash("0.31415", 10));
+    obsidio::risk_hash_x4("0.5", "none", "0.4821", "0.31415", a, b, c, d, 1);
+    expect_eq("x4 n=1 lane A", a, obsidio::risk_hash("0.5", 1));
+    expect_eq("x4 n=1 lane D", d, obsidio::risk_hash("0.31415", 1));
+  }
+
+  // -------------------------------------------------------------------------
+  // Back end status. Semantics depend on how this run was invoked:
+  //
+  //   RISK_BACKEND unset / "reference"  (the default and oracle passes)
+  //     A rejected accelerated back end is not a correctness failure -- the
+  //     fallback serves correct digests and every check above still passes --
+  //     but it silently costs ~7x throughput, which is the whole competition.
+  //     On an architecture that HAS an accelerated back end, a core rejection
+  //     means the back end is buggy: fail the build rather than ship quietly
+  //     slow. A partial lane rejection only costs some lanes, so it warns.
+  //
+  //   RISK_BACKEND=arm / x86-sha-ni     (forced passes from the Dockerfile)
+  //     These exist to exercise one specific accelerated back end on real
+  //     hardware. If the CPU simply does not have it, SKIP (exit 0) -- the
+  //     same image must build on either architecture. If the CPU has it and
+  //     it fails verification, that is exactly the bug these passes exist to
+  //     catch: FAIL.
+  std::printf("\nHash back end\n");
+  std::printf("  selected: %s\n", obsidio::risk_backend_name());
+  const char* forced = obsidio::risk_backend_forced();
+  const bool accelerated_forced =
+      forced != nullptr &&
+      (std::strcmp(forced, "arm") == 0 || std::strcmp(forced, "x86-sha-ni") == 0);
+
+  if (obsidio::risk_backend_rejected()) {
+    std::printf(
+        "  FAIL  an accelerated back end was available but FAILED "
+        "self-verification\n");
+    ++g_failures;
+  } else if (accelerated_forced && obsidio::risk_backend_partial()) {
+    // Under a forced accelerated pass, a dropped lane means that lane's code
+    // is wrong on this CPU. The default pass degrades gracefully in production;
+    // here it must be loud enough to break the build.
+    std::printf(
+        "  FAIL  forced back end verified its core but DROPPED a lane\n");
+    ++g_failures;
+  } else if (obsidio::risk_backend_partial()) {
+    std::printf(
+        "  WARN  accelerated core verified but a wide lane was disabled; "
+        "pool degraded to fewer lanes\n");
+  } else if (accelerated_forced && std::strstr(obsidio::risk_backend_name(),
+                                               "reference") != nullptr) {
+    std::printf("  SKIP  forced back end \"%s\" not available on this CPU\n",
+                forced);
+    std::printf("\nskipped (forced back end unavailable)\n");
+    return 0;
+  }
 
   if (g_failures == 0) {
     std::printf("\nall checks passed\n");

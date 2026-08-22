@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/prathamnayak/obsidio/starters/cpp/build-asan/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
