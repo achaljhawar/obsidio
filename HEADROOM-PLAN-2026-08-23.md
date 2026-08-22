@@ -1,0 +1,248 @@
+# Claiming the headroom: plan of record, 2026-08-23
+
+Companion to [`docs/history/ryzen-ceiling-findings.md`](docs/history/ryzen-ceiling-findings.md).
+Everything here is derived from that session's measurements,
+[`docs/phase-split-kernel.md`](docs/phase-split-kernel.md) (with its Stage 1
+retraction), and
+[`docs/wide-block2-negative-result.md`](docs/wide-block2-negative-result.md).
+All three were on separate branches when this was written; Phase 0 merged them.
+
+**The claim being planned against:** `SHA256RNDS2` is latency bound (L=4,
+T=1), the shipped two-lane kernel runs at ~half the instruction's sustainable
+rate, and the risk chain is ~91% of server CPU. The honest value band for
+closing that gap is **+15% to +45%** of `work_score` (the +71% figure uses the
+good end of a noisy plateau and a projection style that has already missed by
+45 points once — treat it as the ceiling, not the estimate).
+
+**The lesson this plan is built around:** Stage 1 died because a projection
+joined two separately-measured halves across a boundary the chain state has to
+cross. So this plan never spends kernel-writing days on arithmetic. Every
+phase ends in a numeric gate measured *in the structure that will ship*, and
+failing a gate costs at most a day.
+
+---
+
+## Ledger — what is already banked, dead, or live
+
+| Item | Status |
+|---|---|
+| Backend lane-width batching (fixes the x3 −39% defect) | **Landed on `main`** (`b37408b`), system effect unmeasured |
+| epoll re-arm elision + `data.ptr` connections | **Landed on `main`** (`64689a7`), ~1% expected, unmeasured |
+| Harness fixes: `RISK_PCT` forwarding, AVX/SSE transition isolation | **Committed on `perf/ryzen-ceiling`** (`69f4f91`), unmerged |
+| Stage 1 (wide block 2) | **Dead**: −23% measured; retraction on both branches |
+| `SCHED_IDLE`/scheduler tuning, `IO_THREADS=1`, x3 batching | **Dead**, closed by measurement |
+| Stage 2 (phase-split block 1) | **Live**, gated on three unmeasured quantities — the subject of this plan |
+| Baseline | 5,767,977 cool-state, **taken before the two landed perf commits** |
+
+---
+
+## Phase 0 — consolidate and re-baseline (~half a day)
+
+Nothing new gets measured well while the tree is scattered across three
+branches and two untracked files.
+
+1. **Merge `perf/ryzen-ceiling` into `main`** (bench instrumentation,
+   `avx_transition.cpp`, the two harness fixes, `phase-split-kernel.md` with
+   its retraction banner). Merge `perf/wide-block2`'s doc and
+   `bench_wide_block2.cpp` too — the negative result and its control bench are
+   exactly what Phase 1 builds on. `main` is ahead of origin and stays local
+   until a reviewer has diffed the lot.
+2. **Commit `OBSIDIO-FINDINGS-2026-08-23.md`** (move under `docs/history/` to
+   match the filing convention — it landed as
+   [`ryzen-ceiling-findings.md`](docs/history/ryzen-ceiling-findings.md), since
+   that directory names by subject and not by date).
+3. **Close the flagged follow-up in `69f4f91`**: `rnds2_ports.cpp`'s verdict
+   text still asserts port saturation that its own companion bench refutes.
+4. **Codify the Windows/Docker harness workaround** (findings §7) as a script
+   or README section under `bench/ryzen/`: the `docker:cli` harness container
+   with the socket passed through, the same-absolute-path bind mount, the LF
+   copy, `MSYS_NO_PATHCONV=1`. It was re-derived once already; make reruns a
+   one-liner.
+5. **Re-baseline.** One full unmodified grading run, cool box (idle ≥15 min,
+   no `CLOCK DOWN` warnings). This captures the landed lane-batching and epoll
+   work — expected +1–3% over 5.77M — and becomes the reference every later
+   A/B is judged against. Do not skip this: attributing those percents to the
+   kernel later would corrupt the Stage 2 verdict.
+
+**Exit state:** one branch, one baseline number, a rerunnable harness.
+
+---
+
+## Phase 1 — three probes, three kill gates (~1 day)
+
+The three unmeasured assumptions Stage 2 rests on, cheapest first. Each probe
+has a numeric gate; failing any gate kills Stage 2 for the cost of hours.
+
+Scoring arithmetic used throughout (91/9 CPU split): a risk-path speedup `r`
+gives `score × 100 / (91/r + 9)`. So r=1.17 → +15%, r=1.25 → +21%,
+r=1.5 → +43%, r=1.84 → +71%. Shipped kernel: 0.4878 ns/rnds2.
+
+### Probe B — memory-sourced `W+K` (~1 hour)
+
+Extend `rnds2_ports.cpp`: each `rnds2` takes its round constant from a
+16-byte L1 load instead of a register. Sweep lanes 2/4/6, 3 reps, cooldown.
+
+> **Gate B:** worst-rep 4-lane rate ≤ **0.30 ns/rnds2**. The bare plateau is
+> 0.247–0.290; if one load per `rnds2` pushes it past 0.30, the round phase
+> alone can no longer clear the +15% floor once schedule overhead is added.
+
+### Probe C — schedule co-issue (~1 hour)
+
+Same bench, an arm that co-issues the *real* schedule instruction mix
+(`sha256msg1`/`msg2`, `alignr`, `add` — ~1.5 vector ops per `rnds2`, all
+128-bit, never AVX2) alongside the `rnds2` lanes.
+
+> **Gate C:** co-issue cost ≤ **15%** at 4 lanes, worst rep. The
+> `avx_transition.cpp` result (four 128-bit ops cost 0–11%) says this should
+> pass; if the real mix costs materially more, the "schedule hides behind the
+> rounds" premise is wrong and the block-1 estimate inflates past usefulness.
+
+### Probe A — state carry across the phase boundary (~half a day, the decisive one)
+
+The quantity that killed Stage 1 and was never measured. Build a skeletal
+Stage-2 inner loop — not a full kernel: per group-round, a schedule phase
+writing N lanes' 64-entry `W+K` buffers (using the existing 6-register
+schedule sequence, states *not* live), then a round phase interleaving N lanes
+at 2 registers each reading from those buffers, block 2 from `KW2V` as today.
+Real register pressure, real structure, constant-message correctness checks.
+`bench_wide_block2.cpp` is the pattern to extend. (Its build quirk is gone:
+`bench/` was outside the Docker context on `perf/wide-block2` and the source
+had to be mounted by hand, but the Dockerfile that came in with the
+`perf/ryzen-ceiling` merge copies `bench/`, so `docker build --target build`
+produces `obsidio-bench-wide-block2` directly.)
+
+Measure ns/rnds2 at N=2, 3, 4, 6. N=2 is the control — it must land near the
+shipped 0.4878, or the skeleton itself is wrong.
+
+> **Gate A:** worst-rep N=4 (or N=6) ≤ **0.39 ns/rnds2** — i.e. the structure
+> that will actually ship beats the shipped kernel by ≥25%, leaving margin for
+> integration losses over the +15% score floor.
+
+### Phase 1 exit
+
+Re-project Stage 2 using *only* Probe A's joint measurement — not by combining
+B and C arithmetically; B and C exist to explain a Probe A failure, not to
+substitute for it. Proceed to Phase 2 only if the worst-rep projection clears
+**+15% score**. If any gate fails, Stage 2 is dead: write the negative result
+into `docs/` (the Stage 1 write-up is the template) and go to Phase 4.
+
+Probe hygiene for all three: 3+ reps, `--cooldown 60`, in-run ratios rather
+than absolutes, quote the worst rep, never quote an argmax over the plateau.
+
+---
+
+## Phase 2 — the Stage 2 kernel (2–4 days, only after Phase 1 passes)
+
+**Ask the organisers about the grading architecture before starting this
+phase** (`score-levers.md` order-of-operations item 1, still open). Probes are
+cheap enough to run regardless; kernel-days are not. Stage 2 is x86-only —
+`chain_arm.cpp` is already a genuine four-lane interleave. If grading is ARM,
+stop here and re-aim at the ARM ceiling instead.
+
+### Design shape
+
+Per group-round, for N lanes (N=4 first; 6 only if 4 ships and the plateau
+says more is there):
+
+1. **Schedule phase.** For each lane, expand its 64-byte message into an
+   L1-resident `W[0..63]+K` buffer. The schedule depends only on the message —
+   previous round's hex output — not on the chain state, so *no chain states
+   are live here*. Reuses the existing schedule sequence from
+   `compress_generic`; whether to do lanes singly or in interleaved pairs is a
+   measured choice inside Probe A's skeleton.
+2. **Round phase.** All N lanes interleaved at 2 registers per lane: block 1
+   reads `W+K` from the buffers (the shape `compress_const_block2` already
+   has, with a load instead of a table), block 2 from `KW2V`. N=4 costs 8
+   registers plus temporaries; N=6 costs 12.
+
+The structural difference from dead Stage 1, stated so nobody forgets it: N
+chain states are only ever co-resident in code that costs 2 registers per
+lane. The register-hungry schedule code never holds any chain state.
+
+### Order of work
+
+1. **Kernel in the bench first**, never in `src/` first. Alternated A/B
+   against the shipped x2 in one process, digest-verified against the golden
+   before any timing. **Ship gate: ≥ +20% at bench level, worst rep.**
+2. **Integrate** as `chainN_impl` in `chain_x86.cpp`; bump `Backend::lanes`.
+   The pool already batches to `backend->lanes` — the one hardcap to widen is
+   `RiskJob jobs[4]` in `risk_pool.cpp`'s worker loop. Keep the composition
+   rules for odd remainders (drain-mode groups) explicit and measured.
+3. **Correctness ladder, in full, every time the kernel changes:** FIPS
+   vectors; `verify_lane`-style direct comparison; forced
+   `RISK_BACKEND=x86-sha-ni ./build/obsidio-selftest` (must print "all checks
+   passed", not SKIP); ASan/UBSan build over both suites; the Docker build
+   gate. A wrong digest scores zero and looks exactly like a right one.
+4. **Latency coupling check:** wider batches raise per-batch risk latency.
+   Margin is 7.4× on a queueing-dominated p95, so this should be free, but
+   confirm `{tier:risk}` p95 stays green in Phase 3 rather than assuming it.
+
+---
+
+## Phase 3 — system validation (~half a day)
+
+1. **Alternating mixed-probe A/B** (`ab.sh`, the fixed harness with
+   `RISK_PCT` forwarding), new kernel vs `main`, 3 reps, `--cooldown 60`,
+   per-arm spread ≤ ~2%, no `CLOCK DOWN` warnings accepted in a quoted rep.
+2. **Full unmodified grading script**, cool box, against the Phase 0
+   baseline. Accept only with all four thresholds green and 0.00% failures.
+3. Commit the numbers and the conditions they were taken under. One laptop
+   under Docker Desktop/WSL2: the ratios are the deliverable, not the
+   absolutes.
+
+---
+
+## Phase 4 — the floor plan, if Stage 2 dies
+
+Banked regardless: Phase 0's +1–3%. Then the honest remainder, ranked:
+
+| Lever | Expected | Notes |
+|---|---|---|
+| LTO / PGO / clang-vs-gcc sweep | +1–3% | untouched Release flags; mechanical |
+| Fast-path profiling of the 18 µs | +1–2% | 18 µs is mostly genuine work, but double formatting and response-path allocations were never profiled |
+| Spin-then-sleep workers | +0–1% | ramp-edge; `SCHED_IDLE` makes spinning safe |
+| `vzeroupper` after round zero | +0–0.5% | five minutes; insurance against OpenSSL's AVX2 dirtying uppers |
+| Pre-warm before bind; SMT affinity audit | small / insurance | check WSL2 topology passthrough |
+
+**Asymmetric x3 is presumed dead** by the wide-block2 diagnostic — it carries
+a third chain state across block 1's register-hungry code, the exact mechanism
+that cost −23% with four states. Revisit only if Probe A happens to show N=3
+carry is nearly free.
+
+**The prize lever is claimable in every branch of this plan.** The track
+judges a resilience write-up, and this repo now owns material almost no other
+team will have: a −23% retraction with a controlled diagnostic, two harness
+bugs caught before they wrote wrong conclusions into the record, and a
+measurement discipline (alternated A/B, thermal gating, worst-rep quoting)
+with receipts. Folding the Stage 1 story into `docs/resilience-writeup.md` is
+hours of work with no measurement risk, and it pays out whether or not Stage 2
+ships.
+
+---
+
+## Guardrails (apply to every phase)
+
+- **Measure the joint, never the halves.** No projection built by combining
+  separately-measured components crosses a phase gate. This is the rule Stage
+  1 wrote in −23% ink.
+- **Thermal discipline:** cool box for baselines, `--cooldown 60` for sweeps,
+  alternated A/B for comparisons, worst rep quoted, `CLOCK DOWN` reps
+  discarded.
+- **Digest verification precedes every timing.** No exception, including in
+  probes — a wrong digest scores zero and looks exactly like a right one.
+- **Everything stays 128-bit.** The AVX/SSE transition penalty is ~98.5%;
+  `sha256rnds2` has no VEX encoding. No AVX2 anywhere near the kernel.
+- **File negative results.** A dead lever with a written cause is the cheapest
+  thing this project produces and has already prevented two wrong records.
+
+## Expected value, stated honestly
+
+| Path | Cost | Value |
+|---|---|---|
+| Phase 0 alone | ~half a day | +1–3% banked, plus a clean tree and rerunnable harness |
+| Phases 0–1, gates fail | ~1.5 days | the +1–3%, plus Stage 2 closed for good with a written cause |
+| Phases 0–3, gates pass | ~4–6 days | **+15% floor, +45% realistic top end** on `work_score` |
+| Phase 4 fallback | ~1–2 days | +3–6% combined, plus the prize write-up |
+
+The gates exist because the last projection with this much upside missed by 45
+points. Trust the structure, not the arithmetic.

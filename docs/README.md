@@ -43,6 +43,24 @@ hypotheses, and later retractions so the decision trail remains auditable.
 - [Score levers](history/score-levers.md) — cost model re-derived from
   `k6/grading.js` and the C++ source; supersedes the lever ranking in the next-
   levers note and lists the corrections it implies elsewhere.
+- [Ryzen ceiling findings](history/ryzen-ceiling-findings.md) — the
+  `perf/ryzen-ceiling` measurement session: `SHA256RNDS2` is latency bound, not
+  port bound; scheduler tuning and `IO_THREADS=1` closed negative; two harness
+  bugs caught. Corrects five entries in the score-levers note.
+
+## Open design work
+
+Not history — these describe work that is live, and the second retracts the
+first stage of the first.
+
+- [Phase-split kernel](phase-split-kernel.md) — the design brief for the wider
+  SHA-NI kernel, carrying its own Stage 1 retraction banner.
+- [Wide block 2, negative result](wide-block2-negative-result.md) — Stage 1 was
+  built and measures −23%; the diagnostic that explains why is what Stage 2 has
+  to measure first.
+- [Headroom plan](../HEADROOM-PLAN-2026-08-23.md) — the phased plan of record
+  derived from all three, with a numeric kill gate at every phase boundary.
+- [How to test](../HOW-TO-TEST.md) — the runbook the Ryzen numbers came from.
 
 The repository's current state is defined by code on `main`, the root README,
 and the C++ implementation guide—not by unresolved recommendations in a dated
