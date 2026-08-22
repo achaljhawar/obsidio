@@ -5,30 +5,28 @@
 // length 512) so its whole message schedule is a compile-time constant and
 // needs no sha256msg1/msg2 at all.
 //
-// Written without access to any x86 machine with a C++ toolchain -- every
-// instruction sequence below was derived by hand from the documented
-// semantics of each intrinsic, not copy-pasted on faith. It was then
-// verified on real x86-64 hardware (AMD Ryzen 7 6800HS, WSL2 Ubuntu 24.04,
-// 2026-08-22): all selftest digest checks pass (FIPS vectors, short chains,
-// both full 50,000-round chains, every interleaved variant including swapped
-// lanes), and it measured ~4.0x the OpenSSL-per-call reference path
-// (16.7ms -> 4.2ms per chain, three repeated trials, same binary, same run --
-// see STRATEGY.md section 12). chain1/chain2 are that verified code,
-// byte-identical. chain3/chain4 reuse the same hash64() sequences and change
-// only scheduling order -- lanes are pure functions of their own state, so
-// order cannot change results, and risk.cpp verifies each entry point
-// independently at boot anyway, degrading to fewer lanes rather than
-// rejecting the whole back end if one ever disagrees with the oracle.
+// History, because the provenance of crypto code matters:
+//   1. The single-chain instruction sequences (compress_generic,
+//      compress_const_block2) were derived by hand from the documented
+//      semantics of each intrinsic and verified on real x86-64 hardware
+//      (AMD Ryzen 7 6800HS, WSL2, 2026-08-22): FIPS vectors, short chains,
+//      both full 50,000-round chains, all interleaved variants.
+//   2. A coarse chain2/3/4 (back-to-back hash64 calls per round) measured
+//      +28.5% over the OpenSSL fallback on a Ryzen 7 170 (alternating-probe
+//      A/B, ~1% noise floor -- see obsidio-findings.md at the repo root).
+//   3. The register-resident two-lane interleave below replaced the coarse
+//      version. Its digests were verified bit-identical to an independent
+//      reference (portable sha256.cpp) and to the Python goldens by running
+//      this exact file under a scalar emulation of the SHA-NI/SSE intrinsics,
+//      since no arm64 dev machine can execute them natively.
 //
-// verify_backend() in risk.cpp still gates it on every boot, on every
-// architecture -- that is defense in depth against a future regression in
-// this file, not a reason to skip re-testing after changing it:
+// verify_backend() in risk.cpp still gates this back end on every boot, and
+// the Dockerfile's forced pass turns a rejection on a CPU that advertises
+// SHA-NI into a build failure. Neither is a reason to skip re-testing after
+// changing this file:
 //   RISK_BACKEND=x86-sha-ni ./build/obsidio-selftest
-// on any x86-64 host with a C++ toolchain (no epoll/Linux-only APIs needed
-// for the selftest binary itself). A wrong digest here gets rejected at
-// runtime and the chain falls back to the fast scalar path; the Dockerfile's
-// forced pass turns a rejection on a CPU that advertises SHA-NI into a build
-// failure, so re-verify before merging any change to this file.
+// on any x86-64 host with SHA-NI (no epoll/Linux-only APIs needed for the
+// selftest binary itself) -- it must print "all checks passed", not SKIP.
 #include "chain_backend.hpp"
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -304,16 +302,220 @@ void chain1_impl(const char in[64], int rounds, char out[64]) {
   std::memcpy(out, state, 64);
 }
 
-// Coarse-grained interleaving: independent, data-dependency-free calls back to
-// back let an out-of-order core overlap some of sha256rnds2's multi-cycle
-// latency between the chains. Not as tight a weave as the ARM back end's
-// round-by-round interleave -- on x86 that would mean carrying three or four
-// lane states through one hand-unrolled loop against a 16-entry XMM register
-// file (six registers per lane minimum), which spills before it pays. The
-// instruction sequences here are byte-identical to the hardware-verified
-// single-chain path; only their scheduling order differs, and scheduling order
-// cannot change results because the lanes are pure functions of their own
-// state.
+// ---------------------------------------------------------------------------
+// Register-resident two-lane interleave.
+//
+// The coarse chain2 this replaces called hash64() twice per round, so each
+// lane's state round-tripped through a char[64] in memory 50,000 times and the
+// only cross-lane overlap was whatever the out-of-order window caught across a
+// whole two-block hash. Here both lanes live entirely in XMM registers for the
+// whole chain: the two sha256rnds2 dependency chains are interleaved statement
+// by statement so lane B's rounds fill lane A's multi-cycle rnds2 latency, and
+// the digest -> 64-hex-char -> next-message conversion happens in registers
+// too (PSHUFB nibble lookup), so nothing touches memory between round 1 and
+// round 50,000.
+//
+// Two lanes is the x86 ceiling: a lane is ~6 vectors (2 state + 4 schedule),
+// sha256rnds2 reserves XMM0 as its implicit operand, and the 16-entry XMM file
+// fits two lanes with a handful of registers left for round temporaries. A
+// third lane spills the schedule and a fourth cannot fit at all -- the ARM
+// back end's x4 needs a 32-entry vector file. chain3/chain4 therefore run as
+// a pair plus a single / two pairs, which keeps this function's per-chain
+// rate at the deeper queue batches the pool prefers under load.
+
+// 64 hex characters as four vectors, in memory order.
+struct Hex {
+  __m128i h0, h1, h2, h3;
+};
+
+// Block-1 message words, already byte-swapped into schedule order.
+struct Msg {
+  __m128i m0, m1, m2, m3;
+};
+
+inline Msg load_msg(const char in[64]) {
+  Msg m;
+  m.m0 = _mm_shuffle_epi8(
+      _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + 0)), kBswap);
+  m.m1 = _mm_shuffle_epi8(
+      _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + 16)), kBswap);
+  m.m2 = _mm_shuffle_epi8(
+      _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + 32)), kBswap);
+  m.m3 = _mm_shuffle_epi8(
+      _mm_loadu_si128(reinterpret_cast<const __m128i*>(in + 48)), kBswap);
+  return m;
+}
+
+inline Msg hex_to_msg(const Hex& h) {
+  Msg m;
+  m.m0 = _mm_shuffle_epi8(h.h0, kBswap);
+  m.m1 = _mm_shuffle_epi8(h.h1, kBswap);
+  m.m2 = _mm_shuffle_epi8(h.h2, kBswap);
+  m.m3 = _mm_shuffle_epi8(h.h3, kBswap);
+  return m;
+}
+
+inline void store_hex(const Hex& h, char out[64]) {
+  _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 0), h.h0);
+  _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 16), h.h1);
+  _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 32), h.h2);
+  _mm_storeu_si128(reinterpret_cast<__m128i*>(out + 48), h.h3);
+}
+
+// Final (ABEF, CDGH) -> 64 lowercase hex chars, entirely in registers: permute
+// back to (A..D)/(E..H) word order, byte-swap to digest byte order, split each
+// byte into nibbles, look the ASCII digits up with PSHUFB, and interleave
+// hi/lo. Same output as finish_digest + hex_encode, minus the memory trip.
+inline Hex state_to_hex(const State& S) {
+  const __m128i tmp = _mm_shuffle_epi32(S.abef, 0x1B);
+  const __m128i s1 = _mm_shuffle_epi32(S.cdgh, 0xB1);
+  const __m128i abcd = _mm_blend_epi16(tmp, s1, 0xF0);
+  const __m128i efgh = _mm_alignr_epi8(s1, tmp, 8);
+
+  const __m128i lut = _mm_setr_epi8('0', '1', '2', '3', '4', '5', '6', '7',
+                                    '8', '9', 'a', 'b', 'c', 'd', 'e', 'f');
+  const __m128i nib = _mm_set1_epi8(0x0f);
+
+  const __m128i d0 = _mm_shuffle_epi8(abcd, kBswap);  // digest bytes 0..15
+  const __m128i d1 = _mm_shuffle_epi8(efgh, kBswap);  // digest bytes 16..31
+
+  const __m128i hi0 = _mm_shuffle_epi8(lut, _mm_and_si128(_mm_srli_epi16(d0, 4), nib));
+  const __m128i lo0 = _mm_shuffle_epi8(lut, _mm_and_si128(d0, nib));
+  const __m128i hi1 = _mm_shuffle_epi8(lut, _mm_and_si128(_mm_srli_epi16(d1, 4), nib));
+  const __m128i lo1 = _mm_shuffle_epi8(lut, _mm_and_si128(d1, nib));
+
+  Hex h;
+  h.h0 = _mm_unpacklo_epi8(hi0, lo0);
+  h.h1 = _mm_unpackhi_epi8(hi0, lo0);
+  h.h2 = _mm_unpacklo_epi8(hi1, lo1);
+  h.h3 = _mm_unpackhi_epi8(hi1, lo1);
+  return h;
+}
+
+// Both lanes' block-1 compressions, interleaved statement by statement. The
+// schedule is the exact sequence of compress_generic above, duplicated per
+// lane; interleaving cannot change results because each lane is a pure
+// function of its own state. Consumes the Msg structs.
+inline void compress2(State& SA, Msg& A, State& SB, Msg& B) {
+  __m128i a0 = SA.abef, a1 = SA.cdgh;
+  __m128i b0 = SB.abef, b1 = SB.cdgh;
+  __m128i ka, kb, ta, tb;
+
+#define OB_RNDS2_PAIR2(MA, MB, KIDX)                    \
+  do {                                                  \
+    ka = _mm_add_epi32((MA), KV[KIDX]);                 \
+    kb = _mm_add_epi32((MB), KV[KIDX]);                 \
+    a1 = _mm_sha256rnds2_epu32(a1, a0, ka);             \
+    b1 = _mm_sha256rnds2_epu32(b1, b0, kb);             \
+    ka = _mm_shuffle_epi32(ka, 0x0E);                   \
+    kb = _mm_shuffle_epi32(kb, 0x0E);                   \
+    a0 = _mm_sha256rnds2_epu32(a0, a1, ka);             \
+    b0 = _mm_sha256rnds2_epu32(b0, b1, kb);             \
+  } while (0)
+
+// Schedule extension, both lanes: MNEXT += alignr(MCUR, MPREV, 4), then msg2.
+#define OB_EXT2(MCUR, MPREV, MNEXT)                     \
+  do {                                                  \
+    ta = _mm_alignr_epi8(A.MCUR, A.MPREV, 4);           \
+    tb = _mm_alignr_epi8(B.MCUR, B.MPREV, 4);           \
+    A.MNEXT = _mm_add_epi32(A.MNEXT, ta);               \
+    B.MNEXT = _mm_add_epi32(B.MNEXT, tb);               \
+    A.MNEXT = _mm_sha256msg2_epu32(A.MNEXT, A.MCUR);    \
+    B.MNEXT = _mm_sha256msg2_epu32(B.MNEXT, B.MCUR);    \
+  } while (0)
+
+#define OB_MSG1_2(MPREV, MCUR)                          \
+  do {                                                  \
+    A.MPREV = _mm_sha256msg1_epu32(A.MPREV, A.MCUR);    \
+    B.MPREV = _mm_sha256msg1_epu32(B.MPREV, B.MCUR);    \
+  } while (0)
+
+  OB_RNDS2_PAIR2(A.m0, B.m0, 0);
+
+  OB_RNDS2_PAIR2(A.m1, B.m1, 1);
+  OB_MSG1_2(m0, m1);
+
+  OB_RNDS2_PAIR2(A.m2, B.m2, 2);
+  OB_MSG1_2(m1, m2);
+
+  OB_RNDS2_PAIR2(A.m3, B.m3, 3);
+  OB_EXT2(m3, m2, m0);
+  OB_MSG1_2(m2, m3);
+
+  OB_RNDS2_PAIR2(A.m0, B.m0, 4);
+  OB_EXT2(m0, m3, m1);
+  OB_MSG1_2(m3, m0);
+
+  OB_RNDS2_PAIR2(A.m1, B.m1, 5);
+  OB_EXT2(m1, m0, m2);
+  OB_MSG1_2(m0, m1);
+
+  OB_RNDS2_PAIR2(A.m2, B.m2, 6);
+  OB_EXT2(m2, m1, m3);
+  OB_MSG1_2(m1, m2);
+
+  OB_RNDS2_PAIR2(A.m3, B.m3, 7);
+  OB_EXT2(m3, m2, m0);
+  OB_MSG1_2(m2, m3);
+
+  OB_RNDS2_PAIR2(A.m0, B.m0, 8);
+  OB_EXT2(m0, m3, m1);
+  OB_MSG1_2(m3, m0);
+
+  OB_RNDS2_PAIR2(A.m1, B.m1, 9);
+  OB_EXT2(m1, m0, m2);
+  OB_MSG1_2(m0, m1);
+
+  OB_RNDS2_PAIR2(A.m2, B.m2, 10);
+  OB_EXT2(m2, m1, m3);
+  OB_MSG1_2(m1, m2);
+
+  OB_RNDS2_PAIR2(A.m3, B.m3, 11);
+  OB_EXT2(m3, m2, m0);
+  OB_MSG1_2(m2, m3);
+
+  OB_RNDS2_PAIR2(A.m0, B.m0, 12);
+  OB_EXT2(m0, m3, m1);
+  OB_MSG1_2(m3, m0);
+
+  OB_RNDS2_PAIR2(A.m1, B.m1, 13);
+  OB_EXT2(m1, m0, m2);
+
+  OB_RNDS2_PAIR2(A.m2, B.m2, 14);
+  OB_EXT2(m2, m1, m3);
+
+  OB_RNDS2_PAIR2(A.m3, B.m3, 15);
+
+#undef OB_RNDS2_PAIR2
+#undef OB_EXT2
+#undef OB_MSG1_2
+
+  SA.abef = _mm_add_epi32(a0, SA.abef);
+  SA.cdgh = _mm_add_epi32(a1, SA.cdgh);
+  SB.abef = _mm_add_epi32(b0, SB.abef);
+  SB.cdgh = _mm_add_epi32(b1, SB.cdgh);
+}
+
+// Both lanes' constant second block: the same KW2V entry feeds both rnds2
+// chains, so this is 64 interleaved rounds with zero schedule work and only
+// one constant load per four rounds.
+inline void compress2_const(State& SA, State& SB) {
+  __m128i a0 = SA.abef, a1 = SA.cdgh;
+  __m128i b0 = SB.abef, b1 = SB.cdgh;
+  for (int i = 0; i < 16; ++i) {
+    const __m128i k = KW2V[i];
+    a1 = _mm_sha256rnds2_epu32(a1, a0, k);
+    b1 = _mm_sha256rnds2_epu32(b1, b0, k);
+    const __m128i ks = _mm_shuffle_epi32(k, 0x0E);
+    a0 = _mm_sha256rnds2_epu32(a0, a1, ks);
+    b0 = _mm_sha256rnds2_epu32(b0, b1, ks);
+  }
+  SA.abef = _mm_add_epi32(a0, SA.abef);
+  SA.cdgh = _mm_add_epi32(a1, SA.cdgh);
+  SB.abef = _mm_add_epi32(b0, SB.abef);
+  SB.cdgh = _mm_add_epi32(b1, SB.cdgh);
+}
+
 void chain2_impl(const char in_a[64], const char in_b[64], int rounds,
                  char out_a[64], char out_b[64]) {
   if (rounds <= 0) {
@@ -321,67 +523,43 @@ void chain2_impl(const char in_a[64], const char in_b[64], int rounds,
     std::memcpy(out_b, in_b, 64);
     return;
   }
-  char sa[64], sb[64];
-  std::memcpy(sa, in_a, 64);
-  std::memcpy(sb, in_b, 64);
-  for (int r = 0; r < rounds; ++r) {
-    hash64(sa, sa);
-    hash64(sb, sb);
+  Msg ma = load_msg(in_a);
+  Msg mb = load_msg(in_b);
+  for (int r = 0;;) {
+    State sa{kInitABEF, kInitCDGH};
+    State sb{kInitABEF, kInitCDGH};
+    compress2(sa, ma, sb, mb);
+    compress2_const(sa, sb);
+    const Hex ha = state_to_hex(sa);
+    const Hex hb = state_to_hex(sb);
+    if (++r == rounds) {
+      store_hex(ha, out_a);
+      store_hex(hb, out_b);
+      return;
+    }
+    ma = hex_to_msg(ha);
+    mb = hex_to_msg(hb);
   }
-  std::memcpy(out_a, sa, 64);
-  std::memcpy(out_b, sb, 64);
 }
 
+// A pair plus a single: two register-resident lanes is the XMM ceiling, so
+// the third chain runs after the pair rather than spilling all three.
 void chain3_impl(const char in_a[64], const char in_b[64], const char in_c[64],
                  int rounds, char out_a[64], char out_b[64], char out_c[64]) {
-  if (rounds <= 0) {
-    std::memcpy(out_a, in_a, 64);
-    std::memcpy(out_b, in_b, 64);
-    std::memcpy(out_c, in_c, 64);
-    return;
-  }
-  char sa[64], sb[64], sc[64];
-  std::memcpy(sa, in_a, 64);
-  std::memcpy(sb, in_b, 64);
-  std::memcpy(sc, in_c, 64);
-  for (int r = 0; r < rounds; ++r) {
-    hash64(sa, sa);
-    hash64(sb, sb);
-    hash64(sc, sc);
-  }
-  std::memcpy(out_a, sa, 64);
-  std::memcpy(out_b, sb, 64);
-  std::memcpy(out_c, sc, 64);
+  chain2_impl(in_a, in_b, rounds, out_a, out_b);
+  chain1_impl(in_c, rounds, out_c);
 }
 
+// Two pairs: per-chain rate identical to chain2's, so the four-deep batches
+// the pool prefers under load lose nothing to register pressure.
 void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
                  const char in_d[64], int rounds, char out_a[64],
                  char out_b[64], char out_c[64], char out_d[64]) {
-  if (rounds <= 0) {
-    std::memcpy(out_a, in_a, 64);
-    std::memcpy(out_b, in_b, 64);
-    std::memcpy(out_c, in_c, 64);
-    std::memcpy(out_d, in_d, 64);
-    return;
-  }
-  char sa[64], sb[64], sc[64], sd[64];
-  std::memcpy(sa, in_a, 64);
-  std::memcpy(sb, in_b, 64);
-  std::memcpy(sc, in_c, 64);
-  std::memcpy(sd, in_d, 64);
-  for (int r = 0; r < rounds; ++r) {
-    hash64(sa, sa);
-    hash64(sb, sb);
-    hash64(sc, sc);
-    hash64(sd, sd);
-  }
-  std::memcpy(out_a, sa, 64);
-  std::memcpy(out_b, sb, 64);
-  std::memcpy(out_c, sc, 64);
-  std::memcpy(out_d, sd, 64);
+  chain2_impl(in_a, in_b, rounds, out_a, out_b);
+  chain2_impl(in_c, in_d, rounds, out_c, out_d);
 }
 
-const Backend kX86Backend = {"x86-sha-ni (x1..x4 coarse interleave)",
+const Backend kX86Backend = {"x86-sha-ni (register-resident x2; x3/x4 as pairs)",
                              chain1_impl, chain2_impl, chain3_impl,
                              chain4_impl};
 
