@@ -115,6 +115,13 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64"
   # on purpose -- everything Stage 2 touches stays 128-bit.
   add_executable(obsidio-stage2-probes bench/x86/stage2_probes.cpp)
   target_compile_options(obsidio-stage2-probes PRIVATE -O2 -msha -mssse3 -msse4.1)
+
+  # Probe A: the whole phase-split structure, timed against the shipped kernel
+  # in the same process. Links the core so the skeleton's digests can be
+  # checked against risk_hash() before anything is timed.
+  add_executable(obsidio-bench-phase-split bench/x86/bench_phase_split.cpp)
+  target_link_libraries(obsidio-bench-phase-split PRIVATE obsidio_core)
+  target_compile_options(obsidio-bench-phase-split PRIVATE -O2 -msha -mssse3 -msse4.1)
 endif()
 
 enable_testing()
