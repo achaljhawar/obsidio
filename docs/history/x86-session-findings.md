@@ -1,9 +1,19 @@
 # Obsidio — Session Findings
 
+> **Historical snapshot (2026-08-22):** this is the final measurement record for
+> the native x86 session, not the current project guide. Repository-cleanup
+> recommendations in §§12–13 were acted on selectively after this document was
+> written. See the [project README](../../README.md) for current status and the
+> [C++ guide](../../starters/cpp/README.md) for current operation.
+
+> References to the former `AUDIT-HANDOFF.md` and old Compose template are
+> retained as historical evidence. Both were removed during repository cleanup
+> and remain available through Git history.
+
 **Date:** 2026-08-22
 **Machine:** AMD Ryzen 7 170 (8C/16T, x86-64), Windows 11, Docker Desktop / WSL2
 **Repo at start:** `0de6afe` · **at end:** `8beeacd`
-**Supersedes parts of:** `obsidio-findings.md` (see §11 — that document contains claims this session disproved)
+**Supersedes parts of:** [x86-coarse-audit.md](x86-coarse-audit.md) (see §11 — that document contains claims this session disproved)
 
 Everything below was measured in this session unless attributed to a repo document. Where a conclusion was drawn and later overturned, both are recorded — the corrections turned out to be as informative as the results.
 
@@ -14,7 +24,7 @@ Everything below was measured in this session unless attributed to a repo docume
 | | |
 |---|---|
 | **Biggest win** | The x86 hash kernel was rewritten as a register-resident two-lane interleave: **2.389×** on the risk path, measured. |
-| **Biggest surprise** | The grading architecture is **x86-64**, not the arm64 Mac `STRATEGY.md` still asserts. |
+| **Biggest surprise** | The grading architecture is **x86-64**, not the arm64 Mac the [ARM strategy](arm64-strategy-notes.md) asserted at the time. |
 | **Biggest trap avoided** | The AVX2 hybrid idea was **tested and killed** before anyone wrote 600 lines of it. |
 | **Biggest methodological finding** | This laptop **thermally throttles to 1.49 GHz**, halving scores over a session. Absolute numbers from it are near-worthless; only alternated A/B ratios survive. |
 | **Still unclaimed** | The persistence bonus scores **zero** as shipped. |
@@ -23,26 +33,26 @@ Everything below was measured in this session unless attributed to a repo docume
 
 ## 2. The architecture question, settled by hardware
 
-`STRATEGY.md:288` states *"the grading box is an arm64 Mac"*, and `:333` declares *"the x86 question is closed. No x86 back end."*
+The [ARM strategy](arm64-strategy-notes.md#6-which-machine-for-which-work) states *"the grading box is an arm64 Mac"*, and its x86 section declares *"the x86 question is closed. No x86 back end."*
 
 The machine is an **AMD Ryzen 7 170**, x86-64, with `sha_ni`, `avx2`, `bmi2`, `adx`, `vaes` (no AVX-512). Docker runs `linux/amd64`.
 
 Consequences:
 - `chain_arm.cpp` is dead code at grading time.
-- Every headline in `STRATEGY.md` §5 — the 2.96×, the +36%, the x4 lane choice, the 132 ms `/risk` p95 — describes silicon that will not run the graded workload.
+- Every headline in the [ARM strategy](arm64-strategy-notes.md) §5 — the 2.96×, the +36%, the x4 lane choice, the 132 ms `/risk` p95 — describes silicon that will not run the graded workload.
 - The x86 SHA-NI back end, which that document calls "dead", is the code that actually serves.
 
-**`STRATEGY.md` currently instructs a reader to make the wrong decision.** This nearly happened in-session.
+**The then-current ARM strategy instructed a reader to make the wrong decision.** This nearly happened in-session. It is now explicitly labelled as superseded history.
 
 ---
 
 ## 3. First contact: the x86 back end had never run
 
-`AUDIT-HANDOFF.md` §0.3: *"No end-to-end measurement of the x86 path exists in this repo."* `STRATEGY.md:336` records that an amd64 cross-build on the Spark died at `exec format error`.
+The former `AUDIT-HANDOFF.md` §0.3 stated: *"No end-to-end measurement of the x86 path exists in this repo."* The [ARM strategy](arm64-strategy-notes.md) records that an amd64 cross-build on the Spark died at `exec format error`.
 
 This session ran it for the first time.
 
-- Image built; both selftest gates passed (63 assertions, not the 56 `STRATEGY.md` claims).
+- Image built; both selftest gates passed (63 assertions, not the 56 the ARM strategy claimed at the time).
 - Startup banner: `hash back end: x86-sha-ni (x1..x4 coarse interleave)` — CPUID gate passed, per-lane boot verification passed.
 - Digest for `seed=0.5` verified against an independent Python reference in a clean container: **exact match**.
 - Also confirmed at startup: `persistence: DISABLED (/data/prices.log not writable)` — exactly as the audit predicted.
@@ -76,7 +86,7 @@ A 40-second, risk-only, 16-VU probe was written. Alternating arms (A/B/A/B/A/B) 
 | x86-sha-ni | 457.23 | 462.42 | 460.57 | **460.07 /s** | 1.13% |
 | reference | 358.88 | 357.34 | 357.78 | **358.00 /s** | 0.43% |
 
-**The x86 back end is worth +28.5%**, at ~1% resolution, every rep of one arm beating every rep of the other. `AUDIT-HANDOFF.md` §0.3 closed: the back end earns its place, and the audit's pessimism about it was wrong.
+**The x86 back end is worth +28.5%**, at ~1% resolution, every rep of one arm beating every rep of the other. The former handoff's §0.3 question was closed: the back end earns its place, and the audit's pessimism about it was wrong.
 
 **Lesson: the full 4m30s graded script is not an A/B instrument on this machine. The 40s alternated probe is.**
 
@@ -282,20 +292,35 @@ Recorded rather than deleted, because the reasons they were wrong are themselves
 | "Your score is 5.78M" | **Qualified** | True cold; the same image scores 2.66M hot |
 | "main's `/price` being 2× slower means its kernel differs" | **Retracted** | Both images degraded identically; it was thermal |
 | "The 2.6M run was contaminated by my `docker stats` sampling" | **Retracted** | A clean re-run reproduced it |
-| "Build AVX2 multi-buffer" (implied by `STRATEGY.md` roadmap) | **Refuted** | §7 — transition penalty makes it impossible |
+| "Build AVX2 multi-buffer" (implied by the ARM strategy roadmap) | **Refuted** | §7 — transition penalty makes it impossible |
 
-`obsidio-findings.md` in this repo's root was written before items 2, 3 and 6 were known and **contains the superseded 40%-noise-as-warm-up claim**. It needs correcting or replacing.
+The earlier [x86 coarse audit](x86-coarse-audit.md) was written before items 2, 3 and 6 were known and **contains the superseded 40%-noise-as-warm-up claim**. This document supplies the correction.
 
 ---
 
-## 12. Repo defects still open
+## 12. Repository defects recorded at session end
+
+Current resolution of this dated list:
+
+| Item | Current status |
+| --- | --- |
+| Persistence not enabled by the image | **Open.** File-log support exists, but the image still needs an explicit writable `/data` mount. Durability error handling also needs work. |
+| Incorrect Node/Postgres Compose file | **Resolved.** Removed; no replacement is claimed. |
+| Current docs asserted ARM grading | **Resolved.** The ARM document is now labelled as superseded history and current guides describe runtime dispatch. |
+| `IO_THREADS=1` not retested on x86 | **Open.** Requires a controlled mixed-workload experiment. |
+| Generated build artifacts tracked | **Resolved.** Removed and ignored. |
+| Current self-test count stale | **Resolved.** Current guides intentionally avoid a hard-coded count. |
+| ARM-only chain microbenchmark | **Open.** It remains experimental and is not a default build target. |
+| Required resilience write-up missing | **Resolved.** Added as `docs/resilience-writeup.md`. |
+
+The original snapshot follows unchanged for auditability.
 
 | # | Item | Evidence |
 |---|---|---|
 | 1 | **Persistence bonus scores zero.** Dockerfile never creates `/data`, declares no `VOLUME`; runtime logs `persistence: DISABLED` on every start | observed on every run |
-| 2 | **`compose/docker-compose.yml` describes a system nobody built** — still builds `../starters/node` with Postgres | lines 18, 24, 32, 37–38 |
-| 3 | **`STRATEGY.md` asserts an arm64 grading box and a dead x86 path** | `:288`, `:333`, `:482`, `:548` |
-| 4 | **`IO_THREADS=1` never retested on x86** (+3.6–3.9% on ARM); needs a mixed-workload probe | `STRATEGY.md:238` |
+| 2 | **The former Compose file described a system nobody built** — it built the deleted Node starter with Postgres | historical lines 18, 24, 32, 37–38 |
+| 3 | **The ARM strategy asserted an arm64 grading box and a dead x86 path** | historical sections 6, 7, 9, and 11 |
+| 4 | **`IO_THREADS=1` had not been retested on x86** (+3.6–3.9% on ARM); needed a mixed-workload probe | ARM strategy thread sweep |
 | 5 | **Build artifacts tracked in git** — `.gitignore` lists them but they were committed in the same push, so it does not apply | ~110 files, incl. arm64 `bench/throttle` |
 | 6 | **Selftest count stale** — docs say 56, actual 63 | `grep -c expect_eq` |
 | 7 | **`bench/bench_chain.cpp` is ARM-only** (`#include <arm_neon.h>`) — no x86 microbenchmark exists | line 11 |
@@ -304,13 +329,16 @@ Recorded rather than deleted, because the reasons they were wrong are themselves
 
 ---
 
-## 13. What to do next
+## 13. Recommendations at session end
 
-1. **Claim the persistence bonus** (~20 min). `mkdir -p /data` + `VOLUME` in the Dockerfile, rewrite `compose/docker-compose.yml` around the C++ service with a named volume, verify with the existing `tests/persist_test.sh`. `POST /price` is not in the graded mix, so it costs ~0 CPU during the run. **This is a whole bonus category currently forfeited.**
+This list records the priorities at the time. It is not the current work queue;
+consult the root README's known-limitations section before acting on it.
+
+1. **Claim the persistence bonus** (~20 min). `mkdir -p /data` + `VOLUME` in the Dockerfile, add a C++-specific Compose file with a named volume, and verify with `tests/persist_test.sh`. `POST /price` is not in the graded mix, so it costs ~0 CPU during the run. **This is a whole bonus category currently forfeited.**
 2. **Check the Windows power plan** before trusting any further measurement (§8).
 3. **Take the headline number on a cold machine** and say so explicitly in the write-up.
 4. **Write the resilience write-up.** Required deliverable, doesn't exist, and the material is unusually strong — see §14.
-5. **Correct `STRATEGY.md`** and reconcile `obsidio-findings.md`.
+5. **Correct the ARM strategy** and reconcile the earlier x86 audit.
 6. **Delete `perf/x86-fused-x2-interleave`** — redundant with main.
 7. *Optional:* asymmetric x3; `IO_THREADS=1` retest.
 

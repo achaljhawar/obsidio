@@ -1,4 +1,18 @@
-# Obsidio — Complete Findings Report
+# Historical x86 coarse-backend audit
+
+> **Snapshot status:** this report describes commit `0de6afe`, before the
+> register-resident x86 two-lane kernel and repository cleanup landed. Preserve
+> its raw measurements, retractions, and audit trail, but do not treat its open
+> issues or recommendations as current state. The later
+> [x86 session findings](x86-session-findings.md) supersede the explanation of
+> the large run-to-run spread with thermal-throttling evidence. Current status
+> lives in the [project README](../../README.md) and
+> [C++ guide](../../starters/cpp/README.md).
+
+> **Legacy names used below:** `STRATEGY.md` is now
+> `docs/history/arm64-strategy-notes.md`; `obsidio-findings.md` is this file;
+> `AUDIT-HANDOFF.md` and the old Compose template were removed during cleanup
+> and remain available through Git history.
 
 **Date:** 2026-08-22
 **Repo:** `C:\Users\YASH\achal-projects\obsidio` @ `0de6afe` (main, clean)
@@ -23,11 +37,11 @@
 12. [Quantitative decomposition: why the score dropped vs the Spark](#12-quantitative-decomposition-why-the-score-dropped-vs-the-spark)
 13. [Register-file analysis: why ARM's win does not transfer to x86](#13-register-file-analysis-why-arms-win-does-not-transfer-to-x86)
 14. [Validation of the project's own scoring model](#14-validation-of-the-projects-own-scoring-model)
-15. [Repository defects and documentation contradictions](#15-repository-defects-and-documentation-contradictions)
-16. [Audit-item status ledger](#16-audit-item-status-ledger)
+15. [Repository defects and documentation contradictions](#15-repository-defects-and-documentation-contradictions-at-this-snapshot)
+16. [Audit-item status ledger](#16-audit-item-status-ledger-at-this-snapshot)
 17. [Environmental gotchas encountered](#17-environmental-gotchas-encountered)
-18. [Open questions](#18-open-questions)
-19. [Recommendations, prioritised](#19-recommendations-prioritised)
+18. [Open questions](#18-open-questions-at-this-snapshot)
+19. [Recommendations, prioritised](#19-historical-recommendations-prioritised)
 20. [Exact reproduction instructions](#20-exact-reproduction-instructions)
 21. [Raw data appendix](#21-raw-data-appendix)
 
@@ -696,7 +710,7 @@ The small consistent negative bias (~0.06% mean) is the handful of in-flight req
 
 ---
 
-## 15. Repository defects and documentation contradictions
+## 15. Repository defects and documentation contradictions at this snapshot
 
 ### 15.1 The architecture contradiction (highest consequence)
 
@@ -794,7 +808,7 @@ git rm -r --cached starters/cpp/build starters/cpp/build-asan starters/cpp/bench
 
 ---
 
-## 16. Audit-item status ledger
+## 16. Audit-item status ledger at this snapshot
 
 Status of every item in `AUDIT-HANDOFF.md` §5 ("Known-unverified list"), as of this session:
 
@@ -852,7 +866,7 @@ The WSL2 VM reports 7.42 GiB total against 15.3 GB of host RAM. Ample for a 2 Gi
 
 ---
 
-## 18. Open questions
+## 18. Open questions at this snapshot
 
 Ordered by consequence.
 
@@ -873,7 +887,13 @@ Ordered by consequence.
 
 ---
 
-## 19. Recommendations, prioritised
+## 19. Historical recommendations, prioritised
+
+> Subsequent work completed the fused x86 two-lane backend, enabled all four
+> Docker build gates, removed generated artifacts and the incorrect Compose
+> template, and reorganized the documentation. Persistence hardening,
+> HTTP/input hardening, CI, and an x86 `IO_THREADS` comparison remain current
+> concerns; see the root README for the live list.
 
 ### Priority 1 — Correct the documentation (minutes, zero risk)
 

@@ -1,5 +1,15 @@
 # Obsidio: The Siege (Detailed Guide)
 
+> **Source document:** this preserves the supplied challenge specification.
+> The repository has since been narrowed to the C++ submission. For current
+> build and implementation instructions, see the [project README](../../README.md)
+> and [C++ guide](../../starters/cpp/README.md).
+
+> **Executable-script caveat:** the prose below describes intended scoring as
+> correct and within the tier latency budget. The checked-in k6 script currently
+> awards `work_score` from HTTP 200 status alone. The current guides document
+> that gap explicitly.
+
 > ⚔️ This page is the *how*. The track overview told you what Obsidio is; this page gives you the rules of the siege, the box you deploy into, the exact API you build, how it is graded, and how points are scored. Read it fully before you write code. The constraints here are the whole game.
 
 ---
@@ -37,7 +47,9 @@ Your backend runs in Docker, capped and identical for all teams.
 
 > ⚠️ **The core-count gotcha (a real part of the challenge).** Your container is CPU *throttled* but can still *see* all of the host machine's cores. Several runtimes size their worker or thread pools from the visible core count (Go's `GOMAXPROCS`, the JVM, Node's cluster module, Gunicorn and Uvicorn workers, and others). If yours does, it may spin up workers for cores it cannot actually use, and your performance will crater in ways that are hard to debug. Set your worker or thread count explicitly to match the 2 core cap. Getting this right is exactly the kind of thing this track rewards.
 
-New to Docker? Every starter in the code bundle already builds and runs correctly, so you clear the containerisation hurdle for free. See also the [Docker guide] from the Backend Guide for a walkthrough. Containerising your app is table stakes here, not the hard part; the hard part is what you build inside.
+The original code bundle included starter implementations to clear the
+containerisation hurdle. This repository now retains only the optimized C++
+submission; its Docker instructions are in the [C++ guide](../../starters/cpp/README.md).
 
 ---
 
@@ -151,7 +163,7 @@ If you choose to add persistence, you can earn a bonus for surviving a restart:
 - During grading, we will send some updates, restart your container mid run, and check that the updated values survived.
 - **The bonus is awarded only if your data survives the restart AND you still clear all the core thresholds.**
 
-That proviso is the whole point. Persistence costs you: a database eats into your shared 2 CPU and 2 GB budget, and a naive integration can drag your latency below the qualifying bar and cost you more than the bonus is worth. Doing it well, cheaply, without wrecking your resilience, is the real achievement being rewarded. If you add a database, submit a `docker-compose.yml` (see the code bundle for the shape); remember the resource budget is shared across all services.
+That proviso is the whole point. Persistence costs you: a database eats into your shared 2 CPU and 2 GB budget, and a naive integration can drag your latency below the qualifying bar and cost you more than the bonus is worth. Doing it well, cheaply, without wrecking your resilience, is the real achievement being rewarded. If you add a database, submit a `docker-compose.yml`; remember the resource budget is shared across all services. The obsolete template from the original bundle is not retained in this repository because it described a different implementation.
 
 ---
 
