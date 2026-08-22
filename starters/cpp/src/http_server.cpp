@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -64,6 +65,12 @@ bool icontains(std::string_view hay, std::string_view needle) {
   }
   return false;
 }
+
+// See the use site in accept_new(): a test-only SO_SNDBUF pin, 0 when unset.
+const int forced_sndbuf = [] {
+  const char* raw = std::getenv("OBSIDIO_SNDBUF");
+  return (raw != nullptr && *raw != '\0') ? std::atoi(raw) : 0;
+}();
 
 bool set_nonblocking(int fd) {
   const int flags = fcntl(fd, F_GETFL, 0);
@@ -444,8 +451,11 @@ void Server::loop_main(std::size_t index) {
       conn->close_after = !keep_alive;
       build_response(conn->out, status, body, keep_alive);
       conn->out_sent = 0;
+      // Only flush() may decide a connection is finished. Returning false here
+      // whenever close_after was set would tear down a response that had only
+      // partially drained -- flush() signals "done, close now" by returning
+      // false itself, and "still draining, EPOLLOUT armed" by returning true.
       if (!flush(conn)) return false;
-      if (conn->close_after) return false;
     }
   };
 
@@ -460,6 +470,17 @@ void Server::loop_main(std::size_t index) {
       // Nagle would add tens of milliseconds to small responses. Off.
       int one = 1;
       ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+
+      // Test hook, unset in production. The kernel autotunes the send buffer
+      // to megabytes, so every response this service produces fits in one
+      // send() and the partial-write path is unreachable over loopback.
+      // Pinning the buffer small makes backpressure reproducible -- see the
+      // partial-write case in tests/http_test.cpp. Setting SO_SNDBUF also
+      // disables autotuning, which is the point.
+      if (forced_sndbuf > 0) {
+        ::setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &forced_sndbuf,
+                     sizeof(forced_sndbuf));
+      }
 
       auto conn = std::make_unique<Connection>();
       conn->fd = fd;
@@ -546,6 +567,16 @@ void Server::loop_main(std::size_t index) {
         // Same rule as drain_completions: only a finished (or dead) flush may
         // close -- flush() itself signals that by returning false.
         if (!flush(conn)) {
+          close_connection(fd);
+          continue;
+        }
+        // Draining may have unblocked requests that were already read into
+        // conn->in behind the response we were writing. epoll is level
+        // triggered on the *socket*, and those bytes have long since left it,
+        // so no future EPOLLIN will arrive to prompt this -- without parsing
+        // here, pipelined requests behind a backpressured write are never
+        // answered at all.
+        if (conn->out.empty() && !conn->deferred && !process(conn)) {
           close_connection(fd);
           continue;
         }

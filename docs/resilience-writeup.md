@@ -162,17 +162,33 @@ as durable under all tested failures.
 The next work is correctness and operational hardening rather than speculative
 hash optimization:
 
-1. Bound and strictly parse `Content-Length` to remove the remotely triggered
-   overflow/crash path.
-2. Reject non-finite prices and strengthen request-body validation.
-3. Make price mutation and log append one ordered operation with explicit
+1. Make price mutation and log append one ordered operation with explicit
    failure propagation.
-4. Make the grading script validate response shapes, digests, and per-request
+2. Make the grading script validate response shapes, digests, and per-request
    tier latency before awarding work.
-5. Add Linux CI and integration coverage for HTTP parsing, overload, shutdown,
-   persistence failure, restart, and concurrent updates.
-6. Re-evaluate `IO_THREADS=1` on native x86 with an alternating mixed-workload
+3. Extend integration coverage to overload, shutdown, persistence failure,
+   restart, and concurrent updates.
+4. Re-evaluate `IO_THREADS=1` on native x86 with an alternating mixed-workload
    probe.
+
+Items 1 and 2 of the original list are now closed. `Content-Length` is parsed
+with a saturating accumulator that cannot overflow, header and body sizes are
+capped, conflicting duplicates and `Transfer-Encoding` are rejected, and
+non-finite prices are refused both at the HTTP edge and in `update_price`. The
+same change fixed two backpressure defects found while writing the tests: a
+`Connection: close` response could be abandoned after a partial write (observed
+dropping all 211 bytes of a response), and pipelined requests queued behind a
+backpressured write were never parsed at all. Linux CI now runs the image build,
+CTest, and an ASan+UBSan pass; `starters/cpp/tests/http_test.cpp` carries 56
+socket-level checks and also runs as a Docker build gate.
+
+The measurement lesson repeated itself here. The partial-write path is
+unreachable over loopback with default kernel tuning, because autotuning grows
+the send buffer to megabytes while the largest response this service can emit is
+bounded by the 16 KiB header cap. The test pins `SO_SNDBUF` small so
+backpressure is reproducible; without that the test would have passed against
+the bug it was written to catch, which is exactly what it did on the first
+attempt.
 
 ## Evidence
 

@@ -165,6 +165,11 @@ int main(int argc, char** argv) {
     ::setenv("PORT", port, 1);
     ::setenv("IO_THREADS", "1", 1);
     ::setenv("RISK_WORKERS", "1", 1);
+    // Pin the send buffer small so a large response cannot drain in one
+    // send(). Without this the kernel autotunes to megabytes and the
+    // partial-write path below is simply unreachable over loopback. Every
+    // other response in this file is ~100 bytes and unaffected.
+    ::setenv("OBSIDIO_SNDBUF", "4096", 1);
     // The chain back end is irrelevant here and the slow one costs seconds.
     ::setenv("RISK_BACKEND", "reference", 1);
     ::execl(argv[1], argv[1], static_cast<char*>(nullptr));
@@ -313,6 +318,96 @@ int main(int argc, char** argv) {
                s.find("nan") == std::string::npos &&
                    s.find("inf") == std::string::npos &&
                    status_of(s) == 200);
+  }
+
+  std::printf("\nBackpressure: no response is dropped or truncated\n");
+  {
+    // Two bugs lived here, both from treating a partially-drained write as a
+    // finished one:
+    //
+    //   * A `Connection: close` response whose first send() returned EAGAIN
+    //     was abandoned mid-flight -- observed writing 0 of 211 bytes -- so
+    //     the client got a clean FIN and never saw its answer at all.
+    //   * After a backpressured write drained, requests already sitting in
+    //     the read buffer behind it were never parsed, because epoll is level
+    //     triggered on the socket and those bytes had long since left it.
+    //
+    // Both need a full send buffer to reproduce, which is why the server runs
+    // with OBSIDIO_SNDBUF pinned above: the kernel otherwise autotunes to
+    // megabytes and no response this service produces can ever fill it.
+    //
+    // The invariant is the one that matters to a client: every pipelined
+    // request gets a complete, correctly-framed response, however the writes
+    // happened to break up. Depths are chosen to straddle the 4 KiB buffer at
+    // ~211 bytes per response -- N=8 fits comfortably, the rest do not.
+    for (const int depth : {8, 24, 32, 40, 48, 64, 96}) {
+      std::string batch;
+      for (int i = 0; i < depth - 1; ++i) {
+        batch += "GET /stats?symbol=AAPL HTTP/1.1\r\nHost: t\r\n\r\n";
+      }
+      batch +=
+          "GET /stats?symbol=AAPL HTTP/1.1\r\nHost: t\r\nConnection: "
+          "close\r\n\r\n";
+
+      const int fd = connect_server();
+      if (fd < 0) {
+        check_true("connect for backpressure test", false);
+        continue;
+      }
+      std::size_t sent = 0;
+      while (sent < batch.size()) {
+        const ssize_t n =
+            ::send(fd, batch.data() + sent, batch.size() - sent, MSG_NOSIGNAL);
+        if (n <= 0) break;
+        sent += static_cast<std::size_t>(n);
+      }
+      // Deliberately do not read while the server writes: this is what fills
+      // the send buffer and forces the partial-write path.
+      usleep(60 * 1000);
+
+      std::string acc;
+      char buf[8192];
+      for (;;) {
+        const ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+        if (n <= 0) break;
+        acc.append(buf, static_cast<std::size_t>(n));
+      }
+      ::close(fd);
+
+      // Walk the stream response by response; a short final body or a
+      // dangling partial header both count as corruption.
+      int complete = 0;
+      bool corrupt = false;
+      std::size_t pos = 0;
+      for (;;) {
+        const std::size_t he = acc.find("\r\n\r\n", pos);
+        if (he == std::string::npos) {
+          corrupt = pos < acc.size();  // trailing bytes that are not a response
+          break;
+        }
+        std::size_t declared = 0;
+        const std::size_t cl = acc.find("Content-Length: ", pos);
+        if (cl != std::string::npos && cl < he) {
+          declared = std::strtoul(acc.c_str() + cl + 16, nullptr, 10);
+        }
+        if (he + 4 + declared > acc.size()) {
+          corrupt = true;  // body shorter than its own Content-Length
+          break;
+        }
+        pos = he + 4 + declared;
+        ++complete;
+      }
+
+      char label[96];
+      std::snprintf(label, sizeof(label),
+                    "pipeline depth %d: all %d responses complete", depth,
+                    depth);
+      if (complete != depth || corrupt) {
+        std::printf("        depth %d: %d complete, corrupt=%d, %zu bytes\n",
+                    depth, complete, corrupt ? 1 : 0, acc.size());
+      }
+      check_true(label, complete == depth && !corrupt);
+    }
   }
 
   std::printf("\nFraming survives: keep-alive and pipelining still work\n");
