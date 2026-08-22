@@ -560,7 +560,7 @@ void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
 }
 
 const Backend kX86Backend = {"x86-sha-ni (register-resident x2; x3/x4 as pairs)",
-                             chain1_impl, chain2_impl, chain3_impl,
+                             /*lanes=*/2, chain1_impl, chain2_impl, chain3_impl,
                              chain4_impl};
 
 bool cpu_has_sha_ni() {

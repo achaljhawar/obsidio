@@ -84,15 +84,26 @@ bool RiskPool::expired(const RiskJob& job) const {
 void RiskPool::worker_loop() {
   deprioritise_current_thread();
 
+  // Fixed for the life of the process: the back end is selected once, under a
+  // call_once, before any worker starts taking jobs.
+  const int width = risk_lane_width();
+
   for (;;) {
-    // Take up to FOUR jobs when four are queued. A single chain is
+    // Take up to FOUR jobs, but only in whole lane groups. A single chain is
     // latency-bound, so extra independent chains interleaved in the same loop
-    // ride along in the pipeline bubbles: three cost ~37% more time than one
-    // and produce that many answers. This is instruction-level parallelism
-    // inside one thread, NOT extra threads -- the worker count is unchanged and
-    // the 2-CPU cap is untouched. Under the graded load the queue sits deep at
-    // peak, so full batches are essentially always available; the shorter paths
-    // are what run during ramp-up and cool-down.
+    // ride along in the pipeline bubbles -- that is instruction-level
+    // parallelism inside one thread, NOT extra threads: the worker count is
+    // unchanged and the 2-CPU cap is untouched.
+    //
+    // The grouping has to follow the back end's real lane width, not the widest
+    // chainN that happens to exist. On x86 the width is 2, and a three-job
+    // group there composes to chain2 + chain1: the odd chain runs alone at the
+    // 1-lane rate, making the group 39% worse than a two-job group (390.84 vs
+    // 640.46 chains/s, Ryzen 7 170). Leaving that third job queued to pair with
+    // the next arrival is strictly better, and under the graded load the queue
+    // sits deep at peak so a partner is essentially always about to arrive.
+    // Four is still taken whole -- on a width-2 back end chain4 is two fused
+    // pairs, which measures marginally better than two separate calls.
     RiskJob jobs[4];
     int taken = 0;
     {
@@ -104,7 +115,20 @@ void RiskPool::worker_loop() {
         cv_.wait_for(lock, std::chrono::milliseconds(100));
       }
       if (queue_.empty()) return;  // stopping and drained
-      while (taken < 4 && !queue_.empty()) {
+
+      // Whole lane groups while the queue can fill them; otherwise drain what
+      // is left rather than stalling behind a partner that may never come.
+      const int queued = static_cast<int>(queue_.size());
+      int want;
+      if (queued >= 4) {
+        want = 4;
+      } else if (queued >= width) {
+        want = (queued / width) * width;
+      } else {
+        want = queued;
+      }
+
+      while (taken < want) {
         jobs[taken++] = std::move(queue_.front());
         queue_.pop_front();
       }

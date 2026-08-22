@@ -45,6 +45,16 @@ void risk_hash_x4(const std::string& seed_a, const std::string& seed_b,
                   std::string& out_a, std::string& out_b, std::string& out_c,
                   std::string& out_d, int iterations = kRiskIterations);
 
+// How many chains the selected back end advances in genuine lockstep, after
+// accounting for any lane that failed verification. 1 when no accelerated back
+// end qualified, since the fallback gains nothing from grouping.
+//
+// This is what the pool batches to. It is NOT "the widest risk_hash_xN that
+// exists": every xN is callable and correct, but on a back end whose lane
+// width is 2, x3 composes to chain2 + chain1 and the odd chain runs at the
+// 1-lane rate -- measurably worse than not grouping it at all.
+int risk_lane_width();
+
 // Selects and self-verifies the hash back end. Called lazily by risk_hash(),
 // but call it explicitly at startup so the cost and any fallback show up before
 // the first request rather than during one.

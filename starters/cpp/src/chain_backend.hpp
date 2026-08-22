@@ -22,6 +22,23 @@ namespace chain {
 struct Backend {
   const char* name;
 
+  // How many chains this back end genuinely advances in lockstep, which is NOT
+  // the same as the widest chainN it exposes. chain3/chain4 are always callable
+  // and always correct, but a back end may implement them by composition rather
+  // than by interleaving: x86's chain4 is two sequential chain2 calls and its
+  // chain3 is chain2 + chain1, because six XMM registers per lane makes two
+  // lanes the register ceiling there. ARM's chain4 is a real four-lane
+  // interleave.
+  //
+  // The pool batches to this, so it never assembles a group whose odd chain
+  // would fall back to the 1-lane rate. Measured on a Ryzen 7 170: chain3 runs
+  // at 390.84 chains/s against chain2's 640.46 -- a three-job batch is 39%
+  // WORSE than a two-job batch, because the third lane runs alone.
+  //
+  // Do not "simplify" this to a constant 2. Capping ARM at two lanes would
+  // halve its instruction-level parallelism.
+  int lanes;
+
   // Advance one chain `rounds` more times from a 64-hex-char state.
   // `rounds == 0` copies `in` to `out`. `in` and `out` may not overlap.
   void (*chain1)(const char in[64], int rounds, char out[64]);

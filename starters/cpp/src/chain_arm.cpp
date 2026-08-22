@@ -292,7 +292,8 @@ void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
   lane_store_hex(D, out_d);
 }
 
-const Backend kArmBackend = {"armv8-crypto (x4 interleaved)", chain1_impl,
+const Backend kArmBackend = {"armv8-crypto (x4 interleaved)", /*lanes=*/4,
+                             chain1_impl,
                              chain2_impl, chain3_impl, chain4_impl};
 
 bool cpu_has_sha2() {

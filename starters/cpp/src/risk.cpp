@@ -223,6 +223,19 @@ void select_backend() {
 
 void init_risk_backend() { std::call_once(g_select_once, select_backend); }
 
+int risk_lane_width() {
+  init_risk_backend();
+  if (g_backend == nullptr) return 1;
+  int width = g_backend->lanes;
+  // A lane that failed verification was nulled out above, and the risk_hash_xN
+  // wrappers quietly compose around the hole. Narrow the batch instead, so the
+  // pool stops assembling groups the back end can no longer run as one.
+  if (width >= 4 && g_backend->chain4 == nullptr) width = 3;
+  if (width >= 3 && g_backend->chain3 == nullptr) width = 2;
+  if (width < 1) width = 1;
+  return width;
+}
+
 const char* risk_backend_name() {
   init_risk_backend();
   if (g_backend != nullptr) {

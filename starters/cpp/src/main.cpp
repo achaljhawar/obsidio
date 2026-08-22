@@ -333,9 +333,10 @@ int main() {
   std::fprintf(stderr,
                "obsidio-cpp listening on :%u  io_threads=%zu risk_workers=%zu "
                "risk_queue=%zu risk_deadline_ms=%zu\n"
-               "  hash back end: %s\n",
+               "  hash back end: %s (lane width %d)\n",
                static_cast<unsigned>(port), io_threads, risk_workers, risk_queue,
-               risk_deadline_ms, obsidio::risk_backend_name());
+               risk_deadline_ms, obsidio::risk_backend_name(),
+               obsidio::risk_lane_width());
 
   server.run();
   pool.stop();
