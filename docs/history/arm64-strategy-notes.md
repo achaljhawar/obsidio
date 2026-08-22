@@ -1,10 +1,21 @@
-# Obsidio: strategy and working notes
+# Historical ARM strategy notes
+
+> **Superseded snapshot (2026-08-22):** this document records the original ARM
+> optimization work and remains useful as measurement evidence. Its later claim
+> that the grading machine was an ARM Mac was disproved by native execution on
+> the x86-64 grading machine. Do not use its roadmap as the current project
+> plan. See the [project README](../../README.md), the
+> [C++ guide](../../starters/cpp/README.md), and the later
+> [x86 session findings](x86-session-findings.md).
 
 Everything worked out so far: what the track actually rewards, where the
 leverage is, what has been built, what is verified, and what to do next.
 
-Track rules live in `OBSIDIO-DETAIL-PAGE.md`, `directions.md`, and `track.md`.
-The grading script is `k6/grading.js`. This file is the plan, not the rules.
+Track rules live in [`docs/challenge/spec.md`](../challenge/spec.md),
+[`docs/challenge/directions.md`](../challenge/directions.md), and
+[`docs/challenge/track.md`](../challenge/track.md). The grading script is
+[`k6/grading.js`](../../k6/grading.js). This file is a historical plan, not the
+rules or the current implementation guide.
 
 ---
 
@@ -471,6 +482,11 @@ of importance than predicted:
    architecture.
 
 What is actually left, in order:
+
+> **Later correction:** the file-log implementation existed, but the shipped
+> Docker/Compose path did not enable persistence for the C++ service. The old
+> Compose template targeted Node/Postgres and was later removed. Treat the first
+> item below as the conclusion at the time, not current submission status.
 
 1. ~~**The persistence bonus.**~~ **Done.** Append-only log (`src/persist.cpp`),
    one atomic `O_APPEND` write + `fdatasync` per POST, replayed at startup,

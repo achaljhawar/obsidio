@@ -1,11 +1,17 @@
 # Obsidio Directions & Resources
 
-<aside>
-⚔️
+> **Source document:** this is the supplied short-form challenge guide. The
+> current repository contains only the optimized C++ submission; use the
+> [project README](../../README.md) and
+> [C++ guide](../../starters/cpp/README.md) for operational instructions.
 
-This page is the **how-to**. The track overview told you what Obsidio is; this page covers the siege rules, the box you deploy into, the exact API you build, how it is graded, and how points are scored. Read it fully before you write code. The constraints here are the meat of the whole game.
+> ⚔️ This page is the **how-to**. The track overview told you what Obsidio is;
+> this page covers the siege rules, the box you deploy into, the exact API you
+> build, how it is graded, and how points are scored.
 
-</aside>
+> **Executable-script caveat:** the prose below describes intended scoring as
+> correct and within the tier latency budget. The checked-in k6 script currently
+> awards `work_score` from HTTP 200 status alone.
 
 ## The one-sentence version
 
@@ -25,9 +31,10 @@ Your backend runs in Docker, capped identically for all teams.
 - **The box is capped at 2 CPUs and 2 GB RAM, total, per team.** If you add services (see the persistence bonus), that budget is shared across all of them.
 
 > ⚠️ **The core-count gotcha.** Your container is CPU-throttled but can still *see* all of the host's cores. Some runtimes size their worker or thread pools from the visible core count (Go's `GOMAXPROCS`, the JVM, Node's cluster module, Uvicorn and Gunicorn workers). If yours does, it may spawn workers for cores it can't use and crater your performance. Set your worker count explicitly to match the 2-core cap.
-> 
 
-New to Docker? Every starter in the code bundle already builds and runs, so you clear that hurdle for free. See the [Docker guide] for a walkthrough.
+The original code bundle included starter implementations. This repository now
+retains only the C++ submission; its container walkthrough is in the
+[C++ guide](../../starters/cpp/README.md).
 
 ## The task: a price analytics API
 
@@ -60,7 +67,6 @@ To qualify, your build must clear these bars *(placeholders, finalised on the gr
 | Error rate | under 1% |
 
 > ⚠️ Your `/price` p95 is the number that matters most. A price lookup does almost no work, so if it's slow under load, it's stuck in line behind heavy requests, not slow to compute. Keeping it low is the core skill. Using both cores is a start but usually isn't enough on its own.
-> 
 
 ## What a strong submission looks like
 
@@ -72,7 +78,7 @@ score = (1 x /price) + (3 x /stats) + (10 x /risk)
 
 Late, errored, or timed-out requests don't count, which is why graceful behaviour wins: a build that sheds overflow fast and keeps its good requests quick out-scores one that accepts everything and lets it rot in a slow queue. There's no ceiling, so the best teams compete on how much they wring from the fixed box. We can tell the difference between a system that held because you engineered it to and one that held by luck; your write-up and pitch are where you show it was deliberate.
 
-**Optional bonus: persistence under restart.** Entirely optional, and a real tradeoff rather than free points. Add a `POST /price` that records an update, back it with storage that survives a container restart, and you earn a bonus *if your data survives a mid-run restart AND you still clear every latency bar.* The catch: a database eats into your shared 2 CPU / 2 GB budget and a naive integration can drop you below the qualifying bar, costing more than the bonus is worth. Doing it cheaply without wrecking your resilience is the achievement. If you attempt it, submit a `docker-compose.yml` (shape in the code bundle).
+**Optional bonus: persistence under restart.** Entirely optional, and a real tradeoff rather than free points. Add a `POST /price` that records an update, back it with storage that survives a container restart, and you earn a bonus *if your data survives a mid-run restart AND you still clear every latency bar.* The catch: a database eats into your shared 2 CPU / 2 GB budget and a naive integration can drop you below the qualifying bar, costing more than the bonus is worth. Doing it cheaply without wrecking your resilience is the achievement. If you attempt it, submit a `docker-compose.yml`. The original template is not retained here because it targeted a deleted implementation.
 
 ## Where to start
 
@@ -89,9 +95,9 @@ Late, errored, or timed-out requests don't count, which is why graceful behaviou
 
 ## Resources
 
-This is the GitHub repo for your skeleton code:
-
-https://github.com/solpercival/Obsidio
+The original skeleton was published at
+[solpercival/Obsidio](https://github.com/solpercival/Obsidio). This repository
+contains the evolved C++ submission.
 
 ## A note on judging
 
