@@ -22,13 +22,18 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
 
 # Correctness gate. FIPS vectors plus the full 50,000-round chain.
 #
-# Run TWICE. The first pass exercises whatever accelerated back end this build
+# FOUR passes. The first exercises whatever accelerated back end this build
 # host offers; the second forces the serving fallback (chain_fallback ->
-# sha256_64) against the same golden digests. Without the second pass the
-# fallback -- the only path an x86 or crypto-less grading box would ever run --
-# ships untested.
+# sha256_64) so it cannot ship untested. The last two force each accelerated
+# back end by name: on a host whose CPU lacks that back end the selftest
+# SKIPs (exit 0), but on a host that advertises it -- the x86 grading box
+# included, since the grader builds this image on its own machine -- a
+# verification failure becomes a BUILD failure instead of a silent ~28%
+# fallback at runtime.
 RUN ./build/obsidio-selftest \
-    && RISK_BACKEND=reference ./build/obsidio-selftest
+    && RISK_BACKEND=reference ./build/obsidio-selftest \
+    && RISK_BACKEND=arm ./build/obsidio-selftest \
+    && RISK_BACKEND=x86-sha-ni ./build/obsidio-selftest
 
 FROM debian:bookworm-20240926-slim
 
