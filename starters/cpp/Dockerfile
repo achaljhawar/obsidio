@@ -35,6 +35,12 @@ RUN ./build/obsidio-selftest \
     && RISK_BACKEND=arm ./build/obsidio-selftest \
     && RISK_BACKEND=x86-sha-ni ./build/obsidio-selftest
 
+# Input-hardening gate: raw-socket tests for Content-Length overflow, header
+# and body caps, conflicting/decoy headers, and non-finite prices. A parser
+# regression here is a crash or a mis-framed request under a hostile client,
+# neither of which the digest self-test above can see.
+RUN ./build/obsidio-http-test ./build/obsidio-server
+
 FROM debian:bookworm-20240926-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -81,5 +81,19 @@ target_link_libraries(obsidio-server PRIVATE obsidio_core)
 add_executable(obsidio-selftest tests/selftest.cpp)
 target_link_libraries(obsidio-selftest PRIVATE obsidio_core)
 
+# Socket-level HTTP tests. These drive a real obsidio-server process over a
+# real socket, so they need the server binary's path -- not a link against it.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(obsidio-http-test tests/http_test.cpp)
+  target_compile_options(obsidio-http-test PRIVATE -Wall -Wextra)
+  add_dependencies(obsidio-http-test obsidio-server)
+endif()
+
 enable_testing()
 add_test(NAME selftest COMMAND obsidio-selftest)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_test(NAME http_input
+           COMMAND obsidio-http-test $<TARGET_FILE:obsidio-server>)
+  # The suite binds a fixed port, so it must not race another copy of itself.
+  set_tests_properties(http_input PROPERTIES RUN_SERIAL TRUE TIMEOUT 120)
+endif()

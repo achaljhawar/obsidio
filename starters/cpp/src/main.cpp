@@ -17,6 +17,7 @@
 //                      something to do.
 //
 // Override any of these with env vars to experiment; see README.md.
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -117,6 +118,11 @@ bool extract_json_string(std::string_view body, std::string_view key,
   return true;
 }
 
+// Strict JSON number grammar, then strtod, then a finiteness check. strtod
+// alone is far too permissive here: it accepts "nan", "inf"/"Infinity", hex
+// floats like 0x10, and overflows "1e999" to infinity -- any of which would
+// be stored by update_price and then rendered as "nan"/"inf" in every
+// subsequent /price and /stats response for that symbol.
 bool extract_json_number(std::string_view body, std::string_view key,
                          double& out) {
   std::string needle = "\"";
@@ -127,10 +133,41 @@ bool extract_json_number(std::string_view body, std::string_view key,
   std::size_t i = body.find(':', pos + needle.size());
   if (i == std::string_view::npos) return false;
   ++i;
-  const std::string text(body.substr(i, 64));
+  while (i < body.size() && (body[i] == ' ' || body[i] == '\t')) ++i;
+
+  // -?digits[.digits][(e|E)[+-]digits], nothing else.
+  const std::size_t start = i;
+  if (i < body.size() && body[i] == '-') ++i;
+  const std::size_t int_start = i;
+  while (i < body.size() && body[i] >= '0' && body[i] <= '9') ++i;
+  if (i == int_start) return false;  // no integer digits: catches nan/inf/"..
+  if (i < body.size() && body[i] == '.') {
+    ++i;
+    const std::size_t frac_start = i;
+    while (i < body.size() && body[i] >= '0' && body[i] <= '9') ++i;
+    if (i == frac_start) return false;
+  }
+  if (i < body.size() && (body[i] == 'e' || body[i] == 'E')) {
+    ++i;
+    if (i < body.size() && (body[i] == '+' || body[i] == '-')) ++i;
+    const std::size_t exp_start = i;
+    while (i < body.size() && body[i] >= '0' && body[i] <= '9') ++i;
+    if (i == exp_start) return false;
+  }
+  // The number must end the value: catches "0x10", "1.2.3", "5abc".
+  if (i < body.size()) {
+    const char c = body[i];
+    if (c != ' ' && c != '\t' && c != '\r' && c != '\n' && c != ',' &&
+        c != '}') {
+      return false;
+    }
+  }
+
+  const std::string text(body.substr(start, i - start));
   char* end = nullptr;
   const double v = std::strtod(text.c_str(), &end);
-  if (end == text.c_str()) return false;
+  if (end != text.c_str() + text.size()) return false;
+  if (!std::isfinite(v)) return false;  // 1e999 parses but overflows to inf
   out = v;
   return true;
 }

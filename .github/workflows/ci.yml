@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  # The image build is itself the primary gate: the Dockerfile runs the digest
+  # self-test (four back-end passes) and the socket-level input-hardening suite
+  # as build steps, so a correctness or parser regression fails the build here
+  # exactly as it would on the grader's machine.
+  docker-build:
+    name: Docker build (gates run inside)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t obsidio-cpp starters/cpp
+
+      - name: Container starts and serves all four endpoints
+        run: |
+          docker run -d --name obsidio-ci --cpus=2 --memory=2g \
+            -p 8080:8080 obsidio-cpp
+          for _ in $(seq 1 50); do
+            curl -sf http://127.0.0.1:8080/health >/dev/null && break
+            sleep 0.2
+          done
+          # The back end actually selected is the single most informative line
+          # in the system -- surface it in the log rather than assuming.
+          docker logs obsidio-ci
+          curl -sf "http://127.0.0.1:8080/price?symbol=AAPL"  && echo
+          curl -sf "http://127.0.0.1:8080/stats?symbol=AAPL"  && echo
+          curl -sf "http://127.0.0.1:8080/risk?seed=0.5"      && echo
+
+      - name: The graded digest matches an independent reference
+        run: |
+          want=$(docker run --rm python:3.11-slim python -c \
+            "import hashlib;h='0.5';[h:=hashlib.sha256(h.encode()).hexdigest() for _ in range(50000)];print(h)")
+          got=$(curl -sf "http://127.0.0.1:8080/risk?seed=0.5" \
+                | sed 's/.*"risk_hash":"\([0-9a-f]*\)".*/\1/')
+          echo "want=$want"
+          echo "got =$got"
+          test "$want" = "$got"
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f obsidio-ci || true
+
+  # Native build so ctest runs the suite directly, and so a compiler other than
+  # the image's pinned GCC 12 gets a look at the code.
+  ctest:
+    name: ctest (native)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++ cmake make libssl-dev
+      - name: Configure and build
+        working-directory: starters/cpp
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j"$(nproc)"
+      - name: ctest
+        working-directory: starters/cpp/build
+        run: ctest --output-on-failure
+
+  # ASan/UBSan turn a silent memory error in the parser into a loud stack
+  # trace. The hardening suite feeds it deliberately malformed input, which is
+  # exactly the traffic worth running under sanitizers.
+  sanitizers:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            g++ cmake make libssl-dev
+      - name: Configure and build (sanitized)
+        working-directory: starters/cpp
+        run: |
+          cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DOBSIDIO_SANITIZE=ON
+          cmake --build build-asan -j"$(nproc)"
+      - name: ctest (sanitized)
+        working-directory: starters/cpp/build-asan
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: ctest --output-on-failure

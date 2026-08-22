@@ -24,6 +24,11 @@ namespace obsidio {
 namespace {
 
 constexpr std::size_t kMaxHeaderBytes = 16 * 1024;
+// The only endpoint with a body is POST /price and its JSON is ~50 bytes, so
+// this is three orders of magnitude of headroom. Anything larger is not a
+// client of this API; buffering it would only donate our 2 GB cap to whoever
+// is sending it.
+constexpr std::size_t kMaxBodyBytes = 64 * 1024;
 constexpr std::size_t kReadChunk = 4096;
 constexpr int kMaxEvents = 256;
 
@@ -33,9 +38,31 @@ const char* status_text(int status) {
     case 400: return "Bad Request";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 413: return "Payload Too Large";
+    case 431: return "Request Header Fields Too Large";
     case 503: return "Service Unavailable";
     default:  return "Internal Server Error";
   }
+}
+
+inline char ascii_lower(char c) {
+  return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
+}
+
+bool iequals(std::string_view a, std::string_view b) {
+  if (a.size() != b.size()) return false;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    if (ascii_lower(a[i]) != ascii_lower(b[i])) return false;
+  }
+  return true;
+}
+
+bool icontains(std::string_view hay, std::string_view needle) {
+  if (needle.empty() || hay.size() < needle.size()) return false;
+  for (std::size_t i = 0; i + needle.size() <= hay.size(); ++i) {
+    if (iequals(hay.substr(i, needle.size()), needle)) return true;
+  }
+  return false;
 }
 
 bool set_nonblocking(int fd) {
@@ -246,6 +273,16 @@ void Server::loop_main(std::size_t index) {
     return true;
   };
 
+  // Answer a protocol error and close. Framing is unknown past this point --
+  // a wrong Content-Length means we cannot know where the next request would
+  // start -- so the connection is never kept alive after a reject.
+  auto reject = [&](Connection* conn, int status, std::string_view body) -> bool {
+    conn->close_after = true;
+    build_response(conn->out, status, body, /*keep_alive=*/false);
+    conn->out_sent = 0;
+    return flush(conn);  // false once fully sent -> caller closes
+  };
+
   // Parse and dispatch as many complete requests as the buffer holds.
   auto process = [&](Connection* conn) -> bool {
     for (;;) {
@@ -253,21 +290,33 @@ void Server::loop_main(std::size_t index) {
 
       const std::size_t head_end = conn->in.find("\r\n\r\n");
       if (head_end == std::string::npos) {
-        if (conn->in.size() > kMaxHeaderBytes) return false;
+        if (conn->in.size() > kMaxHeaderBytes) {
+          return reject(conn, 431, "{\"error\":\"headers too large\"}");
+        }
         return true;  // need more bytes
+      }
+      if (head_end > kMaxHeaderBytes) {
+        return reject(conn, 431, "{\"error\":\"headers too large\"}");
       }
 
       const std::string_view head(conn->in.data(), head_end);
 
       // Request line: METHOD SP TARGET SP VERSION
-      const std::size_t sp1 = head.find(' ');
-      if (sp1 == std::string_view::npos) return false;
-      const std::size_t sp2 = head.find(' ', sp1 + 1);
-      if (sp2 == std::string_view::npos) return false;
+      std::size_t line_end = head.find("\r\n");
+      if (line_end == std::string_view::npos) line_end = head.size();
+      const std::string_view request_line = head.substr(0, line_end);
+      const std::size_t sp1 = request_line.find(' ');
+      const std::size_t sp2 =
+          sp1 == std::string_view::npos ? std::string_view::npos
+                                        : request_line.find(' ', sp1 + 1);
+      if (sp2 == std::string_view::npos || sp2 + 1 >= request_line.size() ||
+          request_line.substr(sp2 + 1, 5) != "HTTP/") {
+        return reject(conn, 400, "{\"error\":\"malformed request line\"}");
+      }
 
       Request req;
-      req.method = head.substr(0, sp1);
-      std::string_view target = head.substr(sp1 + 1, sp2 - sp1 - 1);
+      req.method = request_line.substr(0, sp1);
+      std::string_view target = request_line.substr(sp1 + 1, sp2 - sp1 - 1);
 
       const std::size_t qmark = target.find('?');
       if (qmark == std::string_view::npos) {
@@ -279,25 +328,101 @@ void Server::loop_main(std::size_t index) {
       }
 
       // HTTP/1.1 is keep-alive unless the client says otherwise.
-      bool keep_alive = true;
-      if (head.find("HTTP/1.0") != std::string_view::npos) keep_alive = false;
-      for (const char* needle : {"Connection: close", "connection: close"}) {
-        if (head.find(needle) != std::string_view::npos) keep_alive = false;
-      }
+      bool keep_alive = request_line.substr(sp2 + 1) != "HTTP/1.0";
 
-      // Body, if any.
+      // Headers, one line at a time -- never a substring hunt over the whole
+      // block, which would match "X-Content-Length:", miss mixed case, and
+      // silently take the first of two conflicting values. Content-Length is
+      // the request's framing: parsed strictly (digits only, no sign, bounded,
+      // duplicates must agree) or the request dies with 400/413 rather than
+      // this thread guessing where the next request starts.
+      bool cl_seen = false;
       std::size_t content_length = 0;
-      for (const char* needle : {"Content-Length:", "content-length:"}) {
-        const std::size_t pos = head.find(needle);
-        if (pos != std::string_view::npos) {
-          content_length = static_cast<std::size_t>(
-              std::strtoul(conn->in.data() + pos + strlen(needle), nullptr, 10));
+      int error_status = 0;
+      const char* error_body = nullptr;
+      std::size_t cursor = line_end;
+      while (cursor < head.size()) {
+        cursor += 2;  // the "\r\n" that ended the previous line
+        std::size_t next = head.find("\r\n", cursor);
+        if (next == std::string_view::npos) next = head.size();
+        const std::string_view line = head.substr(cursor, next - cursor);
+        cursor = next;
+
+        const std::size_t colon = line.find(':');
+        if (colon == 0 || colon == std::string_view::npos) {
+          error_status = 400;
+          error_body = "{\"error\":\"malformed header\"}";
           break;
         }
+        const std::string_view name = line.substr(0, colon);
+        // Whitespace inside a header name ("Content-Length : 5") is a classic
+        // smuggling shape: one parser sees the header, another does not.
+        if (name.find(' ') != std::string_view::npos ||
+            name.find('\t') != std::string_view::npos) {
+          error_status = 400;
+          error_body = "{\"error\":\"malformed header\"}";
+          break;
+        }
+        std::string_view value = line.substr(colon + 1);
+        while (!value.empty() && (value.front() == ' ' || value.front() == '\t'))
+          value.remove_prefix(1);
+        while (!value.empty() && (value.back() == ' ' || value.back() == '\t'))
+          value.remove_suffix(1);
+
+        if (iequals(name, "content-length")) {
+          if (value.empty()) {
+            error_status = 400;
+            error_body = "{\"error\":\"malformed content-length\"}";
+            break;
+          }
+          std::size_t parsed = 0;
+          bool digits_ok = true;
+          bool too_large = false;
+          for (const char c : value) {
+            if (c < '0' || c > '9') {
+              digits_ok = false;
+              break;
+            }
+            if (!too_large) {
+              // Saturating accumulate: once past the cap the exact value no
+              // longer matters, and the loop can never overflow size_t.
+              parsed = parsed * 10 + static_cast<std::size_t>(c - '0');
+              if (parsed > kMaxBodyBytes) too_large = true;
+            }
+          }
+          if (!digits_ok) {
+            error_status = 400;
+            error_body = "{\"error\":\"malformed content-length\"}";
+            break;
+          }
+          if (too_large) {
+            error_status = 413;
+            error_body = "{\"error\":\"payload too large\"}";
+            break;
+          }
+          if (cl_seen && parsed != content_length) {
+            error_status = 400;
+            error_body = "{\"error\":\"conflicting content-length\"}";
+            break;
+          }
+          cl_seen = true;
+          content_length = parsed;
+        } else if (iequals(name, "transfer-encoding")) {
+          // Not implemented. Accepting it while reading Content-Length bytes
+          // is exactly how request smuggling works, so it is a hard reject.
+          error_status = 400;
+          error_body = "{\"error\":\"transfer-encoding not supported\"}";
+          break;
+        } else if (iequals(name, "connection")) {
+          if (icontains(value, "close")) keep_alive = false;
+        }
       }
+      if (error_status != 0) return reject(conn, error_status, error_body);
 
       const std::size_t body_start = head_end + 4;
-      if (conn->in.size() < body_start + content_length) return true;  // need more
+      // Subtraction, never body_start + content_length: the sum was the
+      // overflow that let a 20-digit Content-Length wrap size_t.
+      if (conn->in.size() - body_start < content_length) return true;  // need more
       req.body = std::string_view(conn->in.data() + body_start, content_length);
 
       DeferContext ctx{static_cast<int>(index), conn->fd, keep_alive};
@@ -374,7 +499,10 @@ void Server::loop_main(std::size_t index) {
       ev.data.fd = conn->fd;
       ::epoll_ctl(loop.epoll_fd, EPOLL_CTL_ADD, conn->fd, &ev);
 
-      if (!flush(conn) || conn->close_after) {
+      // flush() returns false once a close_after response is fully drained;
+      // checking close_after here as well would tear the connection down in
+      // the middle of a partial write and truncate the response.
+      if (!flush(conn)) {
         close_connection(done.fd);
         continue;
       }
@@ -415,7 +543,9 @@ void Server::loop_main(std::size_t index) {
       }
 
       if (events[i].events & EPOLLOUT) {
-        if (!flush(conn) || conn->close_after) {
+        // Same rule as drain_completions: only a finished (or dead) flush may
+        // close -- flush() itself signals that by returning false.
+        if (!flush(conn)) {
           close_connection(fd);
           continue;
         }
