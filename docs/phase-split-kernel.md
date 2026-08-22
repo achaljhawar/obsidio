@@ -127,6 +127,16 @@ Per chain-round the work splits evenly: 32 `rnds2` in block 1 (live schedule),
 32 in block 2 (constant schedule). Taking the shipped 0.4878 ns/rnds2 average
 and the measured pure-`rnds2` plateau:
 
+> **RETRACTED 2026-08-23 — Stage 1 was built and measures −23%.** The full
+> result, including the diagnostic that explains it, is in
+> `wide-block2-negative-result.md` on `perf/wide-block2`. In short: the loss is
+> the cost of holding four chain states across block 1's register-hungry code,
+> and widening block 2 recovers nothing net once its inputs are spilled state.
+> Stage 2 is not refuted — it separates the phases and never holds N states
+> through block 1 — but the premise that Stage 1 is a cheap down payment on it
+> is dead, and the projection below missed by 45 points. Read the rest of this
+> section as the reasoning that was tried, not as a plan.
+
 ### Stage 1 — widen block 2 only
 
 Add `compressN_const` for N = 4 or 6, keeping block 1 as today's pairs. Per
