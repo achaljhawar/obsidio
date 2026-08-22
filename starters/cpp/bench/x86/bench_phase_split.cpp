@@ -52,7 +52,7 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr int kMaxLanes = 6;
+constexpr int kMaxLanes = 8;
 constexpr int kVerifyRounds = 512;
 constexpr int kTimeRounds = 400000;
 constexpr int kReps = 7;
@@ -303,6 +303,214 @@ inline void group_round(Hex hex[N], __m128i wk[N][16]) {
   }
 }
 
+// ===========================================================================
+// The pipelined variant (docs/phase-split-negative-result.md section 6).
+// ===========================================================================
+//
+// Sequential phase-split loses because the schedule stops hiding inside
+// sha256rnds2 latency and becomes its own paid phase -- 46% of the group-round
+// at four lanes. The repair is to co-issue it with the round phase again.
+//
+// THE CONSTRAINT THAT SHAPES THIS. You cannot hide round r+1's schedule inside
+// round r's round phase for the same lane: the schedule's input is the hex
+// that round phase has not produced yet. Within a lane the dependency is
+// strictly serial, and no amount of scheduling gets around it.
+//
+// So the pipeline runs across lane GROUPS. Split N lanes into halves A and B:
+//
+//     prime:  schedule(A)
+//     step 1: rounds(A) co-issued with schedule(B)
+//     step 2: rounds(B) co-issued with schedule(A')   <- A' is step 1's output
+//
+// Two steps advance every lane by one round. Each step's two halves are
+// independent: step 1's schedule reads B's message, which step 2 of the
+// previous iteration produced, and step 2's schedule reads the A output step 1
+// just wrote.
+//
+// The register bill is why this might work where the naive co-issue did not.
+// Probe C put N round lanes and N schedule streams live at once -- 28
+// registers at four lanes. Here a step runs HALF round lanes and ONE schedule
+// stream at a time: HALF=2 means 2 lanes of state (4) plus a msg temporary
+// each (2) plus one 5-register schedule stream, and the two scheduled lanes
+// are staggered so lane 0's schedule rides block 1 and lane 1's rides block 2.
+//
+// The cost is that the round phase is only HALF lanes wide, which is exactly
+// the interleaving the shipped kernel already has at N=4. Whether the co-issue
+// pays for that narrowing is the measurement.
+struct SchedState {
+  __m128i m0, m1, m2, m3;
+};
+
+__attribute__((always_inline)) inline SchedState sched_begin(const Hex& h) {
+  SchedState s;
+  s.m0 = _mm_shuffle_epi8(h.h0, kBswap);
+  s.m1 = _mm_shuffle_epi8(h.h1, kBswap);
+  s.m2 = _mm_shuffle_epi8(h.h2, kBswap);
+  s.m3 = _mm_shuffle_epi8(h.h3, kBswap);
+  return s;
+}
+
+// schedule_lane's sequence broken into 16 resumable steps, one per rnds2 pair,
+// so it can be dealt out between round-phase pairs. Step P produces wk[P].
+// Verified against schedule_lane directly in main() before anything is timed.
+template <int P>
+__attribute__((always_inline)) inline void sched_at(SchedState& s,
+                                                    __m128i wk[16]) {
+  if constexpr (P == 0) {
+    wk[0] = _mm_add_epi32(s.m0, KV[0]);
+  } else if constexpr (P == 1) {
+    wk[1] = _mm_add_epi32(s.m1, KV[1]);
+    s.m0 = _mm_sha256msg1_epu32(s.m0, s.m1);
+  } else if constexpr (P == 2) {
+    wk[2] = _mm_add_epi32(s.m2, KV[2]);
+    s.m1 = _mm_sha256msg1_epu32(s.m1, s.m2);
+  } else if constexpr (P == 3) {
+    wk[3] = _mm_add_epi32(s.m3, KV[3]);
+  } else if constexpr (P >= 4 && P <= 13) {
+    constexpr int r = (P - 4) % 4;
+    __m128i t;
+    if constexpr (r == 0) {
+      t = _mm_alignr_epi8(s.m3, s.m2, 4);
+      s.m0 = _mm_add_epi32(s.m0, t);
+      s.m0 = _mm_sha256msg2_epu32(s.m0, s.m3);
+      s.m2 = _mm_sha256msg1_epu32(s.m2, s.m3);
+      wk[P] = _mm_add_epi32(s.m0, KV[P]);
+    } else if constexpr (r == 1) {
+      t = _mm_alignr_epi8(s.m0, s.m3, 4);
+      s.m1 = _mm_add_epi32(s.m1, t);
+      s.m1 = _mm_sha256msg2_epu32(s.m1, s.m0);
+      s.m3 = _mm_sha256msg1_epu32(s.m3, s.m0);
+      wk[P] = _mm_add_epi32(s.m1, KV[P]);
+    } else if constexpr (r == 2) {
+      t = _mm_alignr_epi8(s.m1, s.m0, 4);
+      s.m2 = _mm_add_epi32(s.m2, t);
+      s.m2 = _mm_sha256msg2_epu32(s.m2, s.m1);
+      s.m0 = _mm_sha256msg1_epu32(s.m0, s.m1);
+      wk[P] = _mm_add_epi32(s.m2, KV[P]);
+    } else {
+      t = _mm_alignr_epi8(s.m2, s.m1, 4);
+      s.m3 = _mm_add_epi32(s.m3, t);
+      s.m3 = _mm_sha256msg2_epu32(s.m3, s.m2);
+      s.m1 = _mm_sha256msg1_epu32(s.m1, s.m2);
+      wk[P] = _mm_add_epi32(s.m3, KV[P]);
+    }
+  } else if constexpr (P == 14) {
+    const __m128i t = _mm_alignr_epi8(s.m1, s.m0, 4);
+    s.m2 = _mm_add_epi32(s.m2, t);
+    s.m2 = _mm_sha256msg2_epu32(s.m2, s.m1);
+    wk[14] = _mm_add_epi32(s.m2, KV[14]);
+  } else {
+    const __m128i t = _mm_alignr_epi8(s.m2, s.m1, 4);
+    s.m3 = _mm_add_epi32(s.m3, t);
+    s.m3 = _mm_sha256msg2_epu32(s.m3, s.m2);
+    wk[15] = _mm_add_epi32(s.m3, KV[15]);
+  }
+}
+
+#define PIPE_UNROLL16(X) \
+  X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7) X(8) X(9) X(10) X(11) X(12) X(13) \
+  X(14) X(15)
+
+// One pipeline step: advance HALF lanes by a full round while computing HALF
+// lanes' schedules for their next round, interleaved pair by pair.
+template <int HALF>
+__attribute__((always_inline)) inline void pipe_step(Hex hexR[HALF],
+                                                     __m128i wkR[HALF][16],
+                                                     const Hex hexS[HALF],
+                                                     __m128i wkS[HALF][16]) {
+  __m128i st0[HALF], st1[HALF], msg[HALF];
+#pragma GCC unroll 4
+  for (int i = 0; i < HALF; ++i) {
+    st0[i] = kInitABEF;
+    st1[i] = kInitCDGH;
+  }
+
+  // Block 1: round constants from L1, scheduled lane 0 riding along.
+  SchedState sa = sched_begin(hexS[0]);
+#define B1(P)                                                             \
+  {                                                                       \
+    _Pragma("GCC unroll 4") for (int i = 0; i < HALF; ++i) msg[i] = wkR[i][P]; \
+    _Pragma("GCC unroll 4") for (int i = 0; i < HALF; ++i)                \
+        st1[i] = _mm_sha256rnds2_epu32(st1[i], st0[i], msg[i]);           \
+    _Pragma("GCC unroll 4") for (int i = 0; i < HALF; ++i)                \
+        msg[i] = _mm_shuffle_epi32(msg[i], 0x0E);                         \
+    _Pragma("GCC unroll 4") for (int i = 0; i < HALF; ++i)                \
+        st0[i] = _mm_sha256rnds2_epu32(st0[i], st1[i], msg[i]);           \
+    sched_at<P>(sa, wkS[0]);                                              \
+  }
+  PIPE_UNROLL16(B1)
+#undef B1
+
+  __m128i sv0[HALF], sv1[HALF];
+#pragma GCC unroll 4
+  for (int i = 0; i < HALF; ++i) {
+    sv0[i] = _mm_add_epi32(st0[i], kInitABEF);
+    sv1[i] = _mm_add_epi32(st1[i], kInitCDGH);
+    st0[i] = sv0[i];
+    st1[i] = sv1[i];
+  }
+
+  // Block 2: one shared constant, scheduled lane 1 riding along. HALF==1 has
+  // no second lane to schedule, so block 2 runs bare.
+  SchedState sb = sched_begin(hexS[HALF > 1 ? 1 : 0]);
+#define B2(P)                                                             \
+  {                                                                       \
+    __m128i c = KW2V[P];                                                  \
+    _Pragma("GCC unroll 4") for (int i = 0; i < HALF; ++i)                \
+        st1[i] = _mm_sha256rnds2_epu32(st1[i], st0[i], c);                \
+    c = _mm_shuffle_epi32(c, 0x0E);                                       \
+    _Pragma("GCC unroll 4") for (int i = 0; i < HALF; ++i)                \
+        st0[i] = _mm_sha256rnds2_epu32(st0[i], st1[i], c);                \
+    if constexpr (HALF > 1) sched_at<P>(sb, wkS[1]);                      \
+  }
+  PIPE_UNROLL16(B2)
+#undef B2
+
+  // Lanes 2.. of the scheduled half have nowhere to ride; do them plainly.
+  // Only reached at HALF >= 3, and the cost of that shows up in the timing.
+  if constexpr (HALF > 2) {
+    for (int i = 2; i < HALF; ++i) schedule_lane(hexS[i], wkS[i]);
+  }
+
+#pragma GCC unroll 4
+  for (int i = 0; i < HALF; ++i) {
+    hexR[i] = state_to_hex(_mm_add_epi32(st0[i], sv0[i]),
+                           _mm_add_epi32(st1[i], sv1[i]));
+  }
+}
+
+template <int HALF>
+double run_pipelined(int rounds, const char in[2 * HALF][64],
+                     char out[2 * HALF][64]) {
+  constexpr int N = 2 * HALF;
+  Hex hexA[HALF], hexB[HALF];
+  alignas(64) __m128i wkA[HALF][16], wkB[HALF][16];
+  for (int i = 0; i < HALF; ++i) {
+    hexA[i] = load_hex(in[i]);
+    hexB[i] = load_hex(in[HALF + i]);
+  }
+
+  // Prime: group A's first schedule has no round phase to hide inside. One
+  // schedule out of `rounds`, and one wasted at the tail where step 2 computes
+  // a wkA that is never consumed. Both are O(1) against 400,000 rounds and are
+  // outside the timed region; a real kernel pays the same once per chain.
+  for (int i = 0; i < HALF; ++i) schedule_lane(hexA[i], wkA[i]);
+
+  const auto t0 = Clock::now();
+  for (int r = 0; r < rounds; ++r) {
+    pipe_step<HALF>(hexA, wkA, hexB, wkB);  // rounds(A) || schedule(B)
+    pipe_step<HALF>(hexB, wkB, hexA, wkA);  // rounds(B) || schedule(A')
+  }
+  const auto t1 = Clock::now();
+
+  for (int i = 0; i < HALF; ++i) {
+    store_hex(hexA[i], out[i]);
+    store_hex(hexB[i], out[HALF + i]);
+  }
+  (void)sizeof(int[N]);
+  return std::chrono::duration<double>(t1 - t0).count();
+}
+
 template <int N, int SCHED_ILV, int SKIP_SCHED = 0>
 double run_phase_split(int rounds, const char in[N][64], char out[N][64]) {
   Hex hex[N];
@@ -352,7 +560,8 @@ int main() {
   // consumes the previous 64-char hex output, which is what the skeleton does.
   // So risk_hash(seed, 1) is the skeleton's starting state and
   // risk_hash(seed, 1 + R) is what it must produce after R rounds.
-  const char* seeds[kMaxLanes] = {"0.11", "0.22", "0.33", "0.44", "0.55", "0.66"};
+  const char* seeds[kMaxLanes] = {"0.11", "0.22", "0.33", "0.44",
+                                  "0.55", "0.66", "0.77", "0.88"};
   char start[kMaxLanes][64];
   std::string expect[kMaxLanes];
   for (int i = 0; i < kMaxLanes; ++i) {
@@ -382,6 +591,43 @@ int main() {
     VERIFY(2, 1); VERIFY(3, 1); VERIFY(4, 1); VERIFY(6, 1);
     VERIFY(2, 2); VERIFY(4, 2); VERIFY(6, 2);
 #undef VERIFY
+
+    // The resumable schedule must be the same function as the monolithic one,
+    // checked directly rather than only through a chain digest -- a step-order
+    // slip would otherwise surface 512 rounds later as an opaque mismatch.
+    {
+      const Hex h = load_hex(start[0]);
+      alignas(64) __m128i ref[16], inc[16];
+      schedule_lane(h, ref);
+      SchedState s = sched_begin(h);
+#define STEP(P) sched_at<P>(s, inc);
+      PIPE_UNROLL16(STEP)
+#undef STEP
+      if (std::memcmp(ref, inc, sizeof(ref)) != 0) {
+        std::printf("SCHEDULE MISMATCH: sched_at<> != schedule_lane\n");
+        ++failures;
+      } else {
+        std::printf("schedule check: sched_at<0..15> reproduces schedule_lane\n");
+      }
+    }
+
+#define VERIFY_PIPE(HALF)                                                     \
+  do {                                                                        \
+    constexpr int N = 2 * HALF;                                               \
+    char in[N][64], outb[N][64];                                              \
+    for (int i = 0; i < N; ++i) std::memcpy(in[i], start[i], 64);             \
+    run_pipelined<HALF>(kVerifyRounds, in, outb);                             \
+    for (int i = 0; i < N; ++i) {                                             \
+      if (std::memcmp(outb[i], expect[i].data(), 64) != 0) {                  \
+        std::printf("DIGEST MISMATCH pipelined HALF=%d lane %d\n", HALF, i);  \
+        std::printf("  want %.64s\n  got  %.64s\n", expect[i].data(),         \
+                    outb[i]);                                                 \
+        ++failures;                                                           \
+      }                                                                       \
+    }                                                                         \
+  } while (0)
+    VERIFY_PIPE(1); VERIFY_PIPE(2); VERIFY_PIPE(3); VERIFY_PIPE(4);
+#undef VERIFY_PIPE
   }
   if (failures != 0) {
     std::printf("\n%d digest failures -- refusing to time a wrong answer.\n",
@@ -435,6 +681,48 @@ int main() {
   TIME(4, 2, "schedule 2 lanes interleaved");
   TIME(6, 2, "schedule 2 lanes interleaved");
 #undef TIME
+
+  // --- the pipelined variant ------------------------------------------------
+  std::printf("\n  %-28s %5s %10s %10s %10s\n", "pipelined (groups of HALF)",
+              "N", "ns best", "ns worst", "vs ship");
+  std::printf("  ------------------------------------------------------------------\n");
+  double pipe_best_gate = 1e9;
+  int pipe_best_n = 0;
+#define TIMEP(HALF, LABEL)                                                    \
+  do {                                                                        \
+    constexpr int N = 2 * HALF;                                               \
+    char in[N][64], outb[N][64];                                              \
+    std::vector<double> v;                                                    \
+    for (int r = 0; r < kReps; ++r) {                                         \
+      for (int i = 0; i < N; ++i) std::memcpy(in[i], start[i], 64);           \
+      v.push_back(ns_per_rnds2(run_pipelined<HALF>(kTimeRounds, in, outb),    \
+                               kTimeRounds, N));                              \
+    }                                                                         \
+    std::sort(v.begin(), v.end());                                            \
+    std::printf("  %-28s %5d %10.4f %10.4f %9.3fx\n", LABEL, N, v.front(),    \
+                v.back(), ship_worst / v.back());                             \
+    if (v.back() < pipe_best_gate) {                                          \
+      pipe_best_gate = v.back();                                              \
+      pipe_best_n = N;                                                        \
+    }                                                                         \
+  } while (0)
+  TIMEP(1, "rounds x1 || schedule x1");
+  TIMEP(2, "rounds x2 || schedule x2");
+  TIMEP(3, "rounds x3 || schedule x3");
+  TIMEP(4, "rounds x4 || schedule x4");
+#undef TIMEP
+
+  {
+    const double r_pipe = ship_worst / pipe_best_gate;
+    const double s_pipe = 100.0 / (91.0 / r_pipe + 9.0);
+    std::printf("\nGate P  (pipelined worst-rep in-run ratio vs shipped x2 >= 1.17x,\n");
+    std::printf("         i.e. group-round <= %.4f ns/rnds2):\n",
+                ship_worst / 1.17);
+    std::printf("  best: N=%d at %.4f ns worst  ->  %.3fx  ->  %s\n", pipe_best_n,
+                pipe_best_gate, r_pipe, r_pipe >= 1.17 ? "PASS" : "FAIL");
+    std::printf("  projected work_score %+.1f%%\n", (s_pipe - 1.0) * 100.0);
+    std::printf("\n  Section 6's bounds table said -15%% / +51%% / +61%%.\n");
+  }
 
   // --- gate ------------------------------------------------------------------
   double best_gate = 1e9;
