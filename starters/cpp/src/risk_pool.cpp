@@ -1,5 +1,8 @@
 #include "risk_pool.hpp"
 
+#include <atomic>
+#include <cstdio>
+
 #include "risk.hpp"
 
 #if defined(__linux__)
@@ -15,6 +18,14 @@ namespace {
 // The widest group any back end offers. Sizes the per-worker job array; the
 // batcher never asks for more than the selected back end's lane width.
 constexpr int kMaxBatch = 8;
+
+// How many groups actually executed at each width, over the life of the
+// process. One relaxed increment per group against a group that costs
+// milliseconds -- free -- and it answers the question the grading score
+// cannot: how much of the run ran below the kernel's best width. The x8
+// kernel graded 14.5% where the bench ratio said 26%; whether the gap is
+// ramp-phase narrow batches or something else is exactly this histogram.
+std::atomic<unsigned long long> g_group_counts[kMaxBatch + 1];
 
 // Drop this thread to the weakest scheduling class available. Both calls are
 // permitted for unprivileged processes inside a container -- lowering your own
@@ -73,6 +84,20 @@ void RiskPool::stop() {
     if (t.joinable()) t.join();
   }
   workers_.clear();
+
+  // Diagnostics, not telemetry: printed once, at shutdown, to stderr. Reading
+  // it back is how the ramp-width question gets answered from a real run.
+  unsigned long long total = 0;
+  for (int w = 1; w <= kMaxBatch; ++w)
+    total += g_group_counts[w].load(std::memory_order_relaxed);
+  if (total != 0) {
+    std::fprintf(stderr, "risk_pool group widths:");
+    for (int w = 1; w <= kMaxBatch; ++w) {
+      const unsigned long long c = g_group_counts[w].load(std::memory_order_relaxed);
+      if (c != 0) std::fprintf(stderr, "  x%d=%llu", w, c);
+    }
+    std::fprintf(stderr, "  (groups=%llu)\n", total);
+  }
 }
 
 std::size_t RiskPool::queue_depth() const {
@@ -188,12 +213,14 @@ void RiskPool::worker_loop() {
     while (i < live) {
       const int rem = live - i;
       if (rem >= 8) {
+        g_group_counts[8].fetch_add(1, std::memory_order_relaxed);
         std::string seeds[8], digests[8];
         for (int j = 0; j < 8; ++j) seeds[j] = jobs[i + j].seed;
         risk_hash_x8(seeds, digests);
         for (int j = 0; j < 8; ++j) on_done_(jobs[i + j], digests[j]);
         i += 8;
       } else if (rem >= 4) {
+        g_group_counts[4].fetch_add(1, std::memory_order_relaxed);
         std::string digest_a, digest_b, digest_c, digest_d;
         risk_hash_x4(jobs[i].seed, jobs[i + 1].seed, jobs[i + 2].seed,
                      jobs[i + 3].seed, digest_a, digest_b, digest_c, digest_d);
@@ -203,6 +230,7 @@ void RiskPool::worker_loop() {
         on_done_(jobs[i + 3], digest_d);
         i += 4;
       } else if (rem == 3) {
+        g_group_counts[3].fetch_add(1, std::memory_order_relaxed);
         std::string digest_a, digest_b, digest_c;
         risk_hash_x3(jobs[i].seed, jobs[i + 1].seed, jobs[i + 2].seed, digest_a,
                      digest_b, digest_c);
@@ -211,12 +239,14 @@ void RiskPool::worker_loop() {
         on_done_(jobs[i + 2], digest_c);
         i += 3;
       } else if (rem == 2) {
+        g_group_counts[2].fetch_add(1, std::memory_order_relaxed);
         std::string digest_a, digest_b;
         risk_hash_x2(jobs[i].seed, jobs[i + 1].seed, digest_a, digest_b);
         on_done_(jobs[i], digest_a);
         on_done_(jobs[i + 1], digest_b);
         i += 2;
       } else {
+        g_group_counts[1].fetch_add(1, std::memory_order_relaxed);
         on_done_(jobs[i], risk_hash(jobs[i].seed));
         i += 1;
       }

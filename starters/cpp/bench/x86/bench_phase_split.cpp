@@ -411,9 +411,68 @@ __attribute__((always_inline)) inline void sched_at(SchedState& s,
   X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7) X(8) X(9) X(10) X(11) X(12) X(13) \
   X(14) X(15)
 
+// --- probe: co-issuing the second half of the schedule ----------------------
+// objdump on the shipped kernel showed that at HALF >= 3 only lanes 0 and 1
+// actually ride the rounds; lanes 2+ fall through to schedule_lane and are
+// paid for in the open -- roughly half the schedule. Two candidate repairs,
+// each a register-pressure experiment, neither believed until timed:
+//
+//   MODE 1  two streams per block: lanes 0 AND 2 ride block 1, lanes 1 AND 3
+//           ride block 2. Two SchedStates live at once -- the shape Probe C's
+//           streams=2 arm said halves the round rate at 18 registers, now
+//           tried against the real round phase instead of a toy one.
+//   MODE 2  dense dealing, one stream at a time: lane 0's 16 steps ride block
+//           1's pairs 0-7 two per pair, lane 2's ride pairs 8-15; block 2
+//           likewise for lanes 1 and 3. Never more than one SchedState live,
+//           but consecutive steps of one stream are serially dependent, so
+//           the co-issue hides less per step.
+//
+// MODE 0 is the shipped shape, unchanged.
+template <int P, int HALF, int MODE>
+__attribute__((always_inline)) inline void ride_b1(SchedState& sa,
+                                                   SchedState& sc,
+                                                   __m128i wkS[][16]) {
+  if constexpr (MODE == 0) {
+    sched_at<P>(sa, wkS[0]);
+  } else if constexpr (MODE == 1) {
+    sched_at<P>(sa, wkS[0]);
+    if constexpr (HALF > 2) sched_at<P>(sc, wkS[2]);
+  } else {
+    if constexpr (P < 8) {
+      sched_at<2 * P>(sa, wkS[0]);
+      sched_at<2 * P + 1>(sa, wkS[0]);
+    } else if constexpr (HALF > 2) {
+      sched_at<2 * (P - 8)>(sc, wkS[2]);
+      sched_at<2 * (P - 8) + 1>(sc, wkS[2]);
+    }
+  }
+}
+
+template <int P, int HALF, int MODE>
+__attribute__((always_inline)) inline void ride_b2(SchedState& sb,
+                                                   SchedState& sd,
+                                                   __m128i wkS[][16]) {
+  if constexpr (MODE == 0) {
+    if constexpr (HALF > 1) sched_at<P>(sb, wkS[1]);
+  } else if constexpr (MODE == 1) {
+    if constexpr (HALF > 1) sched_at<P>(sb, wkS[1]);
+    if constexpr (HALF > 3) sched_at<P>(sd, wkS[3]);
+  } else {
+    if constexpr (P < 8) {
+      if constexpr (HALF > 1) {
+        sched_at<2 * P>(sb, wkS[1]);
+        sched_at<2 * P + 1>(sb, wkS[1]);
+      }
+    } else if constexpr (HALF > 3) {
+      sched_at<2 * (P - 8)>(sd, wkS[3]);
+      sched_at<2 * (P - 8) + 1>(sd, wkS[3]);
+    }
+  }
+}
+
 // One pipeline step: advance HALF lanes by a full round while computing HALF
 // lanes' schedules for their next round, interleaved pair by pair.
-template <int HALF>
+template <int HALF, int MODE = 0>
 __attribute__((always_inline)) inline void pipe_step(Hex hexR[HALF],
                                                      __m128i wkR[HALF][16],
                                                      const Hex hexS[HALF],
@@ -425,8 +484,10 @@ __attribute__((always_inline)) inline void pipe_step(Hex hexR[HALF],
     st1[i] = kInitCDGH;
   }
 
-  // Block 1: round constants from L1, scheduled lane 0 riding along.
+  // Block 1: round constants from L1, scheduled lane 0 riding along (plus
+  // lane 2, depending on MODE).
   SchedState sa = sched_begin(hexS[0]);
+  SchedState sc = sched_begin(hexS[HALF > 2 ? 2 : 0]);
 #define B1(P)                                                             \
   {                                                                       \
     _Pragma("GCC unroll 4") for (int i = 0; i < HALF; ++i) msg[i] = wkR[i][P]; \
@@ -436,7 +497,7 @@ __attribute__((always_inline)) inline void pipe_step(Hex hexR[HALF],
         msg[i] = _mm_shuffle_epi32(msg[i], 0x0E);                         \
     _Pragma("GCC unroll 4") for (int i = 0; i < HALF; ++i)                \
         st0[i] = _mm_sha256rnds2_epu32(st0[i], st1[i], msg[i]);           \
-    sched_at<P>(sa, wkS[0]);                                              \
+    ride_b1<P, HALF, MODE>(sa, sc, wkS);                                  \
   }
   PIPE_UNROLL16(B1)
 #undef B1
@@ -450,9 +511,11 @@ __attribute__((always_inline)) inline void pipe_step(Hex hexR[HALF],
     st1[i] = sv1[i];
   }
 
-  // Block 2: one shared constant, scheduled lane 1 riding along. HALF==1 has
-  // no second lane to schedule, so block 2 runs bare.
+  // Block 2: one shared constant, scheduled lane 1 riding along (plus lane 3,
+  // depending on MODE). HALF==1 has no second lane to schedule, so block 2
+  // runs bare.
   SchedState sb = sched_begin(hexS[HALF > 1 ? 1 : 0]);
+  SchedState sd = sched_begin(hexS[HALF > 3 ? 3 : 0]);
 #define B2(P)                                                             \
   {                                                                       \
     __m128i c = KW2V[P];                                                  \
@@ -461,15 +524,16 @@ __attribute__((always_inline)) inline void pipe_step(Hex hexR[HALF],
     c = _mm_shuffle_epi32(c, 0x0E);                                       \
     _Pragma("GCC unroll 4") for (int i = 0; i < HALF; ++i)                \
         st0[i] = _mm_sha256rnds2_epu32(st0[i], st1[i], c);                \
-    if constexpr (HALF > 1) sched_at<P>(sb, wkS[1]);                      \
+    ride_b2<P, HALF, MODE>(sb, sd, wkS);                                  \
   }
   PIPE_UNROLL16(B2)
 #undef B2
 
-  // Lanes 2.. of the scheduled half have nowhere to ride; do them plainly.
-  // Only reached at HALF >= 3, and the cost of that shows up in the timing.
-  if constexpr (HALF > 2) {
-    for (int i = 2; i < HALF; ++i) schedule_lane(hexS[i], wkS[i]);
+  // Lanes with nowhere to ride are scheduled plainly, and the cost of that
+  // shows up in the timing. MODE 0 rides two lanes; MODES 1 and 2 ride four.
+  constexpr int kRidden = (MODE == 0) ? 2 : 4;
+  if constexpr (HALF > kRidden) {
+    for (int i = kRidden; i < HALF; ++i) schedule_lane(hexS[i], wkS[i]);
   }
 
 #pragma GCC unroll 4
@@ -479,7 +543,7 @@ __attribute__((always_inline)) inline void pipe_step(Hex hexR[HALF],
   }
 }
 
-template <int HALF>
+template <int HALF, int MODE = 0>
 double run_pipelined(int rounds, const char in[2 * HALF][64],
                      char out[2 * HALF][64]) {
   constexpr int N = 2 * HALF;
@@ -498,8 +562,8 @@ double run_pipelined(int rounds, const char in[2 * HALF][64],
 
   const auto t0 = Clock::now();
   for (int r = 0; r < rounds; ++r) {
-    pipe_step<HALF>(hexA, wkA, hexB, wkB);  // rounds(A) || schedule(B)
-    pipe_step<HALF>(hexB, wkB, hexA, wkA);  // rounds(B) || schedule(A')
+    pipe_step<HALF, MODE>(hexA, wkA, hexB, wkB);  // rounds(A) || schedule(B)
+    pipe_step<HALF, MODE>(hexB, wkB, hexA, wkA);  // rounds(B) || schedule(A')
   }
   const auto t1 = Clock::now();
 
@@ -611,22 +675,25 @@ int main() {
       }
     }
 
-#define VERIFY_PIPE(HALF)                                                     \
+#define VERIFY_PIPE(HALF, MODE)                                               \
   do {                                                                        \
     constexpr int N = 2 * HALF;                                               \
     char in[N][64], outb[N][64];                                              \
     for (int i = 0; i < N; ++i) std::memcpy(in[i], start[i], 64);             \
-    run_pipelined<HALF>(kVerifyRounds, in, outb);                             \
+    run_pipelined<HALF, MODE>(kVerifyRounds, in, outb);                       \
     for (int i = 0; i < N; ++i) {                                             \
       if (std::memcmp(outb[i], expect[i].data(), 64) != 0) {                  \
-        std::printf("DIGEST MISMATCH pipelined HALF=%d lane %d\n", HALF, i);  \
+        std::printf("DIGEST MISMATCH pipelined HALF=%d MODE=%d lane %d\n",    \
+                    HALF, MODE, i);                                           \
         std::printf("  want %.64s\n  got  %.64s\n", expect[i].data(),         \
                     outb[i]);                                                 \
         ++failures;                                                           \
       }                                                                       \
     }                                                                         \
   } while (0)
-    VERIFY_PIPE(1); VERIFY_PIPE(2); VERIFY_PIPE(3); VERIFY_PIPE(4);
+    VERIFY_PIPE(1, 0); VERIFY_PIPE(2, 0); VERIFY_PIPE(3, 0); VERIFY_PIPE(4, 0);
+    VERIFY_PIPE(3, 1); VERIFY_PIPE(4, 1);
+    VERIFY_PIPE(2, 2); VERIFY_PIPE(3, 2); VERIFY_PIPE(4, 2);
 #undef VERIFY_PIPE
   }
   if (failures != 0) {
@@ -688,14 +755,14 @@ int main() {
   std::printf("  ------------------------------------------------------------------\n");
   double pipe_best_gate = 1e9;
   int pipe_best_n = 0;
-#define TIMEP(HALF, LABEL)                                                    \
+#define TIMEP(HALF, MODE, LABEL)                                              \
   do {                                                                        \
     constexpr int N = 2 * HALF;                                               \
     char in[N][64], outb[N][64];                                              \
     std::vector<double> v;                                                    \
     for (int r = 0; r < kReps; ++r) {                                         \
       for (int i = 0; i < N; ++i) std::memcpy(in[i], start[i], 64);           \
-      v.push_back(ns_per_rnds2(run_pipelined<HALF>(kTimeRounds, in, outb),    \
+      v.push_back(ns_per_rnds2(run_pipelined<HALF, MODE>(kTimeRounds, in, outb), \
                                kTimeRounds, N));                              \
     }                                                                         \
     std::sort(v.begin(), v.end());                                            \
@@ -706,10 +773,16 @@ int main() {
       pipe_best_n = N;                                                        \
     }                                                                         \
   } while (0)
-  TIMEP(1, "rounds x1 || schedule x1");
-  TIMEP(2, "rounds x2 || schedule x2");
-  TIMEP(3, "rounds x3 || schedule x3");
-  TIMEP(4, "rounds x4 || schedule x4");
+  TIMEP(1, 0, "rounds x1 || schedule x1");
+  TIMEP(2, 0, "rounds x2 || schedule x2");
+  TIMEP(3, 0, "rounds x3 || schedule x3");
+  TIMEP(4, 0, "rounds x4 || schedule x4");
+  std::printf("  -- probe: co-issue the second schedule half --\n");
+  TIMEP(3, 1, "A: 2 streams/block");
+  TIMEP(4, 1, "A: 2 streams/block");
+  TIMEP(2, 2, "B: dense deal");
+  TIMEP(3, 2, "B: dense deal");
+  TIMEP(4, 2, "B: dense deal");
 #undef TIMEP
 
   {
