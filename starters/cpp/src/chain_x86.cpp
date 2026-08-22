@@ -609,11 +609,14 @@ void chain4_impl(const char in_a[64], const char in_b[64], const char in_c[64],
 // chain2 in the same process: 0.3679 ns/rnds2 against 0.5200, a 1.413x risk
 // path. Holding the round-phase width fixed, the co-issue alone is worth 27%.
 //
-// Known and deliberately not chased here: at four lanes per group only lanes 0
-// and 1 get their schedules co-issued. Lanes 2 and 3 fall through to
-// schedule_all() because a 16-pair block has nowhere left to deal them, so
-// roughly half the schedule is still paid for. Whether spreading the rest pays
-// or hits the register wall is unmeasured.
+// Originally only lanes 0 and 1 got their schedules co-issued and lanes 2-3
+// fell through to schedule_all(), paying roughly half the schedule in the
+// open. That was then probed (bench_phase_split modes A and B): dealing lanes
+// 0+2 into block 1 and 1+3 into block 2 -- two schedule streams live at once,
+// against this real round phase rather than the toy one that condemned it --
+// measures 0.3294 vs 0.3752 ns/rnds2 worst, so the two-stream shape below is
+// what ships. The denser one-stream alternative loses to its own serial
+// dependence (0.4319) and stays unshipped.
 
 // One resumable step of compress_generic's schedule: step P produces the
 // (W+K) vector the round phase consumes at pair P. Splitting it this way is
@@ -702,8 +705,14 @@ inline void pipe_step(Hex hexR[kPipeHalf], __m128i wkR[kPipeHalf][16],
   }
 
   // Block 1: four lanes at two registers each, round constants from L1, with
-  // scheduled lane 0 dealt one step per pair.
+  // scheduled lanes 0 AND 2 dealt one step each per pair. Two schedule streams
+  // live at once was the shape the naive co-issue probe said would blow the
+  // register file; against the real round phase it holds, and it is what
+  // stops lanes 2-3's schedules being paid for in the open. Measured in
+  // bench_phase_split (mode A): 0.3294 vs 0.3752 ns/rnds2 worst -- 14% over
+  // the single-stream shape at N=8.
   Msg sa = hex_to_msg(hexS[0]);
+  Msg sc = hex_to_msg(hexS[2]);
 #define OB_PIPE_B1(P)                                             \
   {                                                               \
     __m128i k0 = wkR[0][P], k1 = wkR[1][P];                       \
@@ -721,6 +730,7 @@ inline void pipe_step(Hex hexR[kPipeHalf], __m128i wkR[kPipeHalf][16],
     s0[2] = _mm_sha256rnds2_epu32(s0[2], s1[2], k2);              \
     s0[3] = _mm_sha256rnds2_epu32(s0[3], s1[3], k3);              \
     sched_step<P>(sa, wkS[0]);                                    \
+    sched_step<P>(sc, wkS[2]);                                    \
   }
   OB_UNROLL16(OB_PIPE_B1)
 #undef OB_PIPE_B1
@@ -736,8 +746,10 @@ inline void pipe_step(Hex hexR[kPipeHalf], __m128i wkR[kPipeHalf][16],
   }
 
   // Block 2: every lane consumes the same KW2V entry, so one register carries
-  // it for all four. Scheduled lane 1 rides here.
+  // it for all four. Scheduled lanes 1 and 3 ride here, so every lane's
+  // schedule now hides under a round phase and nothing is paid for plainly.
   Msg sb = hex_to_msg(hexS[1]);
+  Msg sd = hex_to_msg(hexS[3]);
 #define OB_PIPE_B2(P)                                             \
   {                                                               \
     __m128i k = KW2V[P];                                          \
@@ -751,12 +763,10 @@ inline void pipe_step(Hex hexR[kPipeHalf], __m128i wkR[kPipeHalf][16],
     s0[2] = _mm_sha256rnds2_epu32(s0[2], s1[2], k);               \
     s0[3] = _mm_sha256rnds2_epu32(s0[3], s1[3], k);               \
     sched_step<P>(sb, wkS[1]);                                    \
+    sched_step<P>(sd, wkS[3]);                                    \
   }
   OB_UNROLL16(OB_PIPE_B2)
 #undef OB_PIPE_B2
-
-  // Lanes 2 and 3 have no rounds left to hide under; they are paid for.
-  for (int i = 2; i < kPipeHalf; ++i) schedule_all(hex_to_msg(hexS[i]), wkS[i]);
 
   for (int i = 0; i < kPipeHalf; ++i) {
     State st{_mm_add_epi32(s0[i], f0[i]), _mm_add_epi32(s1[i], f1[i])};
