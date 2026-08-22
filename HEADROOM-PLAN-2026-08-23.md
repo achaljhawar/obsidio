@@ -32,7 +32,7 @@ failing a gate costs at most a day.
 | Stage 1 (wide block 2) | **Dead**: −23% measured; retraction on both branches |
 | `SCHED_IDLE`/scheduler tuning, `IO_THREADS=1`, x3 batching | **Dead**, closed by measurement |
 | Stage 2, sequential phase-split | **Dead**: built as a verified skeleton, measures +6.2% against a +15% floor. See Phase 1 result |
-| Stage 2, **pipelined** phase-split | **Live and passing**: 1.413× measured at 8 lanes, ≈ +36%. Probe only — not integrated, Phase 2 unauthorised |
+| Stage 2, **pipelined** phase-split | **SHIPPED**: integrated as `chain8`, graded at `work_score` 6,664,861 — **+14.5%** over baseline, all thresholds green, risk p95 down 203.65 → 177.24 ms. See Phase 2 result |
 | Baseline | **5,818,877 cool-state**, 2026-08-23, after both landed perf commits (was 5,767,977 before them — see Phase 0 result) |
 
 ---
@@ -244,6 +244,41 @@ plan scoped: an eight-wide risk batch, `Backend::lanes` and `risk_pool` widened
 well past the `RiskJob jobs[4]` hardcap, and a per-batch latency that roughly
 triples (≈ 9.4 ms against 3.3 ms) into a p95 with 7.4× of margin. Full detail
 and the open questions are in §6a of the write-up.
+
+### Phase 2 — authorised, built, shipped. Executed 2026-08-23.
+
+The pipelined kernel went into `src/` as `chain8`, `Backend::lanes` went to 8
+on x86 (ARM untouched at 4), and the pool batches eight-when-eight-are-queued
+with sub-eight groups composing exactly as before. Full correctness ladder
+green: Release ctest, forced `x86-sha-ni` and `reference` selftests, the
+sanitised suite, and the Docker build gate.
+
+One debugging detour that produced a portable fix: the sanitised server was
+dying at startup in a DEADLYSIGNAL loop. Not the kernel, not a race — GCC 12's
+ASan runtime vs `vm.mmap_rnd_bits=32`, a coin flip per process start that
+**pre-exists this branch** (1/10 crashes on `main`, 5/10 on the bigger WIP
+binary, 0/10 with ASLR off). Fixed with `-no-pie` on sanitised builds only;
+20/20 clean starts after.
+
+Measured, integrated, through the backend it registered (worst list in
+`bench_chain_x86`): **x8 = 827.4 chains/s vs x2 = 639.9 → 1.293×** — the probe
+promised 1.371× and integration paid ~6% in hex round-trips and call
+boundaries. Digest-verified against chain2 before timing.
+
+**Grading run (the decision gate): `work_score` 6,664,861 — +14.5% over the
+5,818,877 baseline.** One run, cool box, AC verified. All four thresholds
+green, 0.00% failures (0 of 2,667,659). And the plan's last "should" became a
+number in the right direction: `{tier:risk}` p95 **fell** from 203.65 ms to
+177.24 ms — the tripled per-batch latency is invisible under a queue that
+drains 29% faster. `{tier:price}` p95 412.72 µs, still 484× of margin.
+
++14.5% sits at the +15% floor rather than at the bench's +26% projection: the
+implied system-level risk speedup is 1.16× against 1.293× at the bench, the
+gap being ramp phases running below eight-wide and everything else that is not
+a deep steady queue. Follow-ups with known headroom, deliberately not taken in
+this pass: co-issuing the second half of the schedule (only ~half hides at
+HALF ≥ 3), and pool/wake tuning for the ramp. They are the next probes, not
+assumptions.
 
 ---
 
