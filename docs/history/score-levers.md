@@ -2,8 +2,8 @@
 
 Written after re-deriving the cost model from `k6/grading.js` and the C++
 source rather than from prose. Supersedes the lever ranking in
-`NEXT-LEVERS.md` §8 where the two disagree, and depends on
-`POWER-CORRECTION.md` §5 — several conclusions here only become visible once
+`next-levers.md` §8 where the two disagree, and depends on
+`power-correction.md` §5 — several conclusions here only become visible once
 the 1.49 GHz clock figure is retracted.
 
 Every absolute number below is a measurement of **one laptop** (Ryzen 7 170,
@@ -30,7 +30,7 @@ fixed 60/30/10 mix at weights 1/3/10:
 0.6×1 + 0.3×3 + 0.1×10 = 2.5   ->   work_score = 2.5 × completed requests
 ```
 
-That is where `findings.md` §9's constant comes from, and it means **score is
+That is where `x86-session-findings.md` §9's constant comes from, and it means **score is
 purely throughput**. Nothing else in the scoring function is reachable.
 
 ### Why the latency goal collapses into the throughput goal
@@ -74,7 +74,7 @@ Only visible once the clock is corrected. The two-lane theoretical floor:
 measured                 = 1.82 ms
 ```
 
-**~20-30% above the floor.** `findings.md` §5.4 claims the measurement "lands
+**~20-30% above the floor.** `x86-session-findings.md` §5.4 claims the measurement "lands
 on the two-lane floor" — but that arithmetic implies ~3.5 GHz, which
 contradicts §8's own 1.49 GHz. The contradiction was invisible while the clock
 was wrong, and it resolves in the direction of *more* headroom, not less.
@@ -91,10 +91,10 @@ The whole "~6.4M via asymmetric x3" ceiling rests on one unmeasured quantity:
 
 | if recip-tput is... | then |
 |---|---|
-| 2 cycles | x2 already saturates the port (128 rnds2 in 256 cyc). **x3 and x4 gain exactly zero, forever.** `findings.md` §9's remaining 12% and `NEXT-LEVERS.md` §5 are both dead |
+| 2 cycles | x2 already saturates the port (128 rnds2 in 256 cyc). **x3 and x4 gain exactly zero, forever.** `x86-session-findings.md` §9's remaining 12% and `next-levers.md` §5 are both dead |
 | 1 cycle | x4 is worth up to **2×**, and the register-file argument in §5.3 is the wrong constraint to be reasoning about |
 
-`findings.md` §7.3 tried to measure this and cannot be used: its "4.39 cycles
+`x86-session-findings.md` §7.3 tried to measure this and cannot be used: its "4.39 cycles
 each" was computed with the retracted 1.49 GHz and becomes a nonsensical
 12.4 cyc at the true clock, and its own caveat admits the setup was
 latency-bound at 3 chains.
@@ -103,7 +103,7 @@ A 30-minute microbenchmark — N independent chains, N = 1..8, cycles per
 instruction against N — decides whether a P3 item is P0 or should be deleted.
 **Highest information value per hour of anything on this list.**
 
-> **Corollary:** every absolute "cycles each" figure in `findings.md` is off
+> **Corollary:** every absolute "cycles each" figure in `x86-session-findings.md` is off
 > by ~2.8×. The 60× AVX/SSE ratio in §7.3 survives — it is a ratio — but the
 > ceiling analysis built on those cycle counts does not.
 
@@ -158,15 +158,15 @@ Small (+0-2%, mostly during ramp) but free and provably not-worse.
 **The grading architecture is not actually known.** Two repo documents
 contradict each other and neither cites a source:
 
-- `STRATEGY.md:287` — "Update 2026-08-22: the grading box is an arm64 Mac."
-- `findings.md:26` — "The architecture question, settled by hardware."
+- `arm64-strategy-notes.md:287` — "Update 2026-08-22: the grading box is an arm64 Mac."
+- `x86-session-findings.md:26` — "The architecture question, settled by hardware."
 
 §2's evidence is *"The machine is an AMD Ryzen 7 170... Docker runs
 `linux/amd64`"* — that is the **dev laptop**, not the grader. The conclusion
 does not follow from the premise: it is the same class of error as the
 1.49 GHz reading, an observation about this box promoted into a claim about a
-different one. `track.md` and `directions.md` say **nothing** about
-architecture; the only hardware statement is `directions.md:25`, "capped at
+different one. `../challenge/track.md` and `../challenge/directions.md` say **nothing** about
+architecture; the only hardware statement is `../challenge/directions.md:25`, "capped at
 2 CPUs and 2 GB RAM."
 
 `CMakeLists.txt:12` states the operative fact: *"the grader builds this image
@@ -203,15 +203,15 @@ What shifts per target:
 
 ## 8. What to drop
 
-- **`NEXT-LEVERS.md` §2 "efficiency is thermal headroom"** — dead. A 1.7% sag
-  (`POWER-CORRECTION.md` §5.2) leaves no feedback loop to exploit. Demote
+- **`next-levers.md` §2 "efficiency is thermal headroom"** — dead. A 1.7% sag
+  (`power-correction.md` §5.2) leaves no feedback loop to exploit. Demote
   from P1.
-- **`NEXT-LEVERS.md` §7/§8 "power plan check — possibly re-rates every
+- **`next-levers.md` §7/§8 "power plan check — possibly re-rates every
   number"** — closed, negative. Nothing is re-rated upward.
 - **Load shedding** — the arithmetic says riding the 1% error ceiling is worth
   ~+5% (shed 0.9% of requests, all risk: frees ~9% of CPU, costs 4% of
   weight). Still do not ship it: a hair's breadth from a hard threshold, and
-  `grading.js:74` notes the grader may verify digests. `findings.md` §9 closed
+  `grading.js:74` notes the grader may verify digests. `x86-session-findings.md` §9 closed
   it and the conclusion is right, though the stated reasoning is not.
 - **More threads, caching, GPU** — correctly closed in §9, unaffected by any
   of this.
@@ -224,7 +224,7 @@ What shifts per target:
 | Close kernel gap to x2 floor (§3) | up to +18% | medium | medium | x86 only |
 | Fast path: epoll `MOD` + `data.ptr` (§5) | +2-4% | high | ~1 hr | **yes** |
 | Backend-driven batch width (§6) | +0-2% | high | ~15 min | **yes** |
-| `IO_THREADS=1` retest (`findings.md` §12.4) | +3-4%? | untested on x86 | low | partly |
+| `IO_THREADS=1` retest (`x86-session-findings.md` §12.4) | +3-4%? | untested on x86 | low | partly |
 
 **Order of operations:**
 
@@ -236,11 +236,11 @@ What shifts per target:
 4. **Hold §3 and the lane-count decision** until the architecture is known,
    then run the scaling microbenchmark on the real target.
 
-## 10. Corrections to `findings.md` implied by this document
+## 10. Corrections to `x86-session-findings.md` implied by this document
 
 | Location | Status |
 |---|---|
-| `:19`, §8 clock row — "thermally throttles to 1.49 GHz" | **Retracted** (`POWER-CORRECTION.md` §5) |
+| `:19`, §8 clock row — "thermally throttles to 1.49 GHz" | **Retracted** (`power-correction.md` §5) |
 | §7.3 absolute cycle counts | **Wrong by ~2.8×**; the 60× ratio survives |
 | §5.4 "lands on the two-lane floor" | **Wrong** — implies 3.5 GHz; there is 20-30% of headroom |
 | §2 "the architecture question, settled by hardware" | **Not settled** — evidence is about the dev box |

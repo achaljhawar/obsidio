@@ -1,6 +1,6 @@
 # Power-plan correction: verifying the 1.49 GHz finding
 
-Follow-up to `findings.md` §8 (thermal throttling). That section found the box
+Follow-up to `x86-session-findings.md` §8 (thermal throttling). That section found the box
 degrading ~2.18× over a session and attributed it to a clock drop from
 ~4 GHz nominal to **1.49 GHz measured**, then flagged the right question:
 
@@ -93,7 +93,7 @@ caps aggressively regardless of plan.
 
 If the plan is Balanced/Power-saver or max processor state < 100%: switch to
 High performance (or set minimum/maximum processor state to 100%), then
-re-run the cooldown experiment from `findings.md` §8 unchanged. If the sag
+re-run the cooldown experiment from `x86-session-findings.md` §8 unchanged. If the sag
 disappears → policy; done, re-baseline everything. If it persists with HWiNFO
 showing thermal-flag trips → genuinely thermal; proceed with the efficiency
 lever instead.
@@ -107,7 +107,7 @@ CPU frequency — record it as such rather than as throttling.
 
 | Observation after fixes | Verdict | Action |
 |---|---|---|
-| Clock holds ≥ ~80% of nominal through a full graded run | Policy cap was the cause | Re-run headline numbers; update findings.md §8 with corrected figures |
+| Clock holds ≥ ~80% of nominal through a full graded run | Policy cap was the cause | Re-run headline numbers; update x86-session-findings.md §8 with corrected figures |
 | Still sags; HWiNFO shows Thermal flag | Genuine thermal | Keep numbers as-is; pursue NEXT-LEVERS §1–§2 (waste = heat = lost clock) |
 | Still sags; HWiNFO shows PPT/Power-limit flag | OEM firmware power budget | Treat like thermal for scoring purposes; note it — graders' box may differ |
 | Windows-side clock fine, in-container effective-clock low | Hypervisor/scheduling overhead | Document as WSL2 tax; do not call it throttling |
@@ -120,7 +120,7 @@ Whichever way it resolves, redo once on corrected footing:
 2. Back-to-back decay curve (clock at t=0 vs t=270s alongside work_score).
 3. The alternating A/B probe pairs for any optimisation claims.
 
-And update `findings.md` §8's caveat with the verdict — that section already
+And update `x86-session-findings.md` §8's caveat with the verdict — that section already
 promises the reader the answer is pending.
 
 
@@ -149,7 +149,7 @@ Maximum processor state is 100% on **both** AC and DC, and the machine was
 plugged in. There is no policy cap. The leading suspect is eliminated.
 
 Note the second correction hiding in that output: **nominal is 3.2 GHz base,
-not the "~4 GHz" findings.md §8 assumed.** The ~4 GHz figure was a boost
+not the "~4 GHz" x86-session-findings.md §8 assumed.** The ~4 GHz figure was a boost
 number used as if it were a baseline, which inflated the claimed ratio.
 
 ### 5.2 Sustained-load curve (§1 instrument) — a 1.7% sag, not 2.68×
@@ -201,7 +201,7 @@ source was never committed** — `git log --all --diff-filter=A` over every
 branch shows no such file ever existed in the repo. It cannot be re-run or
 audited; it survives only as a figure quoted in prose.
 
-findings.md §7.2 already documents that same harness getting the clock wrong
+x86-session-findings.md §7.2 already documents that same harness getting the clock wrong
 twice: v1 "miscounted (a 3-cycle chain divided by 2)", and v2 was folded to a
 closed form by GCC and reported "5,747,126 GHz". v3 fixed the folding with an
 `asm volatile` barrier — but nothing in the record shows it fixed the
@@ -231,7 +231,7 @@ NEXT-LEVERS §2 clock-vs-time graph directly.
 
 ### 5.6 Consequences
 
-- findings.md line 19 ("**thermally throttles to 1.49 GHz**") and the §8
+- x86-session-findings.md line 19 ("**thermally throttles to 1.49 GHz**") and the §8
   clock row are **retracted**. §8's own open question is answered: not policy,
   not heat, instrument.
 - NEXT-LEVERS §2 ("efficiency is thermal headroom") loses its premise. With a
@@ -240,11 +240,11 @@ NEXT-LEVERS §2 clock-vs-time graph directly.
 - NEXT-LEVERS §7/§8 "Windows power plan check — possibly re-rates every
   number" is **closed, negative**: the plan was never capping, so nothing is
   re-rated upward.
-- The `findings.md` §8 conclusion that survives untouched is the one that
+- The `x86-session-findings.md` §8 conclusion that survives untouched is the one that
   mattered most: absolute numbers from this box drift badly, and only
   tightly-alternated A/B ratios are trustworthy. The cause changed; the
   methodological discipline it justified was correct anyway.
 
-*Related: NEXT-LEVERS.md §1 (fast-path CPU diet) and §2 (efficiency = thermal
+*Related: next-levers.md §1 (fast-path CPU diet) and §2 (efficiency = thermal
 headroom) are the two levers whose value changes most depending on this
 verdict.*

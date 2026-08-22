@@ -35,6 +35,14 @@ hypotheses, and later retractions so the decision trail remains auditable.
 - [x86 session findings](history/x86-session-findings.md) — later native x86
   measurements, fused-kernel comparison, rejected AVX2 path, and thermal
   analysis.
+- [Next levers](history/next-levers.md) — post-fusion idea list; its thermal-
+  headroom lever is retracted by the power correction below.
+- [Power correction](history/power-correction.md) — retracts the 1.49 GHz
+  throttle reading in the session findings as an instrument artifact, and
+  gives a portable effective-clock probe.
+- [Score levers](history/score-levers.md) — cost model re-derived from
+  `k6/grading.js` and the C++ source; supersedes the lever ranking in the next-
+  levers note and lists the corrections it implies elsewhere.
 
 The repository's current state is defined by code on `main`, the root README,
 and the C++ implementation guide—not by unresolved recommendations in a dated

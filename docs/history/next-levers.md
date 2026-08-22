@@ -1,7 +1,8 @@
 # Obsidio: the next levers
 
-New ideas beyond everything in `STRATEGY.md`, `findings.md`, and
-`X86-THEORETICAL-LIMIT.md`. Written after reconciling all three against the
+New ideas beyond everything in `arm64-strategy-notes.md`, `x86-session-findings.md`, and
+`X86-THEORETICAL-LIMIT.md` (a working note that was never committed to this
+repository). Written after reconciling all three against the
 measured reality on the amd64 box (Ryzen 7 170, WSL2, fused x2 kernel,
 ~5.8M cold / ~2.7M hot, realistic ceiling ~6.4M via asymmetric x3).
 
@@ -14,7 +15,7 @@ advantage can still be built.
 
 ## 1. The fast-path CPU tax — a hidden ~8% leak (audit before building)
 
-`findings.md` §9 contains a number nobody has exploited:
+`x86-session-findings.md` §9 contains a number nobody has exploited:
 
 > Chain free (fast path only: **79,080 req/s at 153% CPU**)
 
@@ -49,7 +50,7 @@ Expected: +3–8%. Effort: medium.
 ## 2. Efficiency is thermal headroom — the compounding lever
 
 The unique physics angle this hardware hands us. The box throttles to
-1.49 GHz under sustained load (`findings.md` §8). Every joule burned on
+1.49 GHz under sustained load (`x86-session-findings.md` §8). Every joule burned on
 non-hash overhead is a joule that lowers the sustained clock during the
 peak-hold minute — where most points are scored.
 
@@ -74,7 +75,7 @@ Expected: +0–1%. Effort: low.
 
 ## 4. vzeroupper hygiene audit (trivial insurance)
 
-`findings.md` §7 proved legacy-SSE/VEX switching costs 60×. The fused kernel
+`x86-session-findings.md` §7 proved legacy-SSE/VEX switching costs 60×. The fused kernel
 is pure SSE+SHA-NI — clean — but round zero goes through OpenSSL, whose
 optimized transforms may execute AVX2 assembly and leave dirty upper YMM
 state that stalls the first SHA-NI rounds of the chain. One `vzeroupper`
@@ -85,7 +86,7 @@ Expected: +0–0.5%. Effort: trivial.
 
 ## 5. Asymmetric x3 — the one live kernel idea (already flagged, here is the shape)
 
-From `findings.md` §9: block 2's message schedule is a compile-time constant,
+From `x86-session-findings.md` §9: block 2's message schedule is a compile-time constant,
 so a third lane needs **no schedule registers there** — it spills only during
 block 1. Concretely: fuse lanes as (pair + single), share the block-2
 constants across all three, accept the block-1 spill window, and measure
@@ -102,7 +103,7 @@ has something almost nobody else will:
 
 - A falsified optimisation with a controlled experiment — the AVX2 hybrid,
   killed by a measured **60×** AVX–SSE transition penalty before anyone wrote
-  it (`findings.md` §7).
+  it (`x86-session-findings.md` §7).
 - A lane count **derived from the register file before coding** (15/16 XMM at
   x2, 21 wanted at x3) that correctly predicts the ARM/x86 difference.
 - A measurement-instrument story: discovered the graded script had a 40%
@@ -111,7 +112,7 @@ has something almost nobody else will:
 - A build-gated correctness ladder, because a wrong digest scores zero and
   looks exactly like a right one.
 
-`findings.md` §14 is a prize-winning script already drafted. Hours spent
+`x86-session-findings.md` §14 is a prize-winning script already drafted. Hours spent
 finishing that write-up likely earn more rank than hours chasing the last 3%
 of throughput — and unlike the score race, almost nobody else is running it.
 
@@ -127,7 +128,7 @@ of throughput — and unlike the score race, almost nobody else is running it.
 | LTO / PGO / clang-vs-gcc | untouched Release flags | +1–3% |
 | Batch-collect wait in pool | ramp phases starve batches; wait-to-fill keeps x2 path | +1–3% |
 | Pre-warm before bind | cold-start artifacts land in scored warm-up minute | small, trivial |
-| Purge tracked build artifacts (~110 files); fix selftest count (56→63); correct `STRATEGY.md` arm64 claims; reconcile `obsidio-findings.md`; delete redundant branch | repo hygiene | credibility |
+| Purge tracked build artifacts (~110 files); fix selftest count (56→63); correct `arm64-strategy-notes.md` arm64 claims; reconcile `x86-coarse-audit.md`; delete redundant branch | repo hygiene | credibility |
 
 ## 8. The ledger
 
