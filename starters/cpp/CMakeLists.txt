@@ -109,6 +109,12 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64"
   # rnds2_ports.cpp now points here rather than drawing the conclusion itself.
   add_executable(obsidio-avx-transition bench/x86/avx_transition.cpp)
   target_compile_options(obsidio-avx-transition PRIVATE -O2 -msha -mssse3 -msse4.1 -mavx2)
+
+  # Phase 1 probes B and C: what a memory-sourced W+K costs the round phase,
+  # and what the real schedule mix costs co-issued alongside it. No AVX2 here
+  # on purpose -- everything Stage 2 touches stays 128-bit.
+  add_executable(obsidio-stage2-probes bench/x86/stage2_probes.cpp)
+  target_compile_options(obsidio-stage2-probes PRIVATE -O2 -msha -mssse3 -msse4.1)
 endif()
 
 enable_testing()
